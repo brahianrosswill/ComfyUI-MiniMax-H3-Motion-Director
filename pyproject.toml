@@ -1,0 +1,14 @@
+[project]
+name = "ComfyUI-MiniMax-H3-Motion-Director"
+description = "Multi-segment MiniMax H3 Motion Director with exported Motion/Audio Context and standard Advanced Sampling."
+version = "0.1.0"
+license = {file = "LICENSE"}
+requires-python = ">=3.10"
+
+[project.urls]
+Repository = "https://github.com/j955229/ComfyUI-MiniMax-H3-Motion-Director"
+
+[tool.comfy]
+PublisherId = ""
+DisplayName = "ComfyUI MiniMax H3 Motion Director"
+Icon = ""
