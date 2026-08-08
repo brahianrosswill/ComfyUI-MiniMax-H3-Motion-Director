@@ -22,6 +22,17 @@ sys.path.insert(0, str(COMFYUI_ROOT))
 
 pytest.importorskip("comfy")
 
+# ComfyUI selects a CUDA device while importing model_management unless its
+# CLI state already says CPU. GitHub's runner uses CPU-only PyTorch, so set the
+# same supported flag before importing the plugin. Real GPU test environments
+# keep their normal device selection.
+import torch
+
+if os.environ.get("MINIMAX_H3_FORCE_CPU") == "1" or not torch.cuda.is_available():
+    from comfy.cli_args import args as comfy_args
+
+    comfy_args.cpu = True
+
 PACKAGE_NAME = "minimax_h3_motion_director_under_test"
 if PACKAGE_NAME not in sys.modules:
     spec = importlib.util.spec_from_file_location(

@@ -22,6 +22,12 @@ async def main() -> None:
     sys.path.insert(0, str(COMFY_ROOT))
     os.chdir(COMFY_ROOT)
 
+    import torch
+    if os.environ.get("MINIMAX_H3_FORCE_CPU") == "1" or not torch.cuda.is_available():
+        from comfy.cli_args import args as comfy_args
+
+        comfy_args.cpu = True
+
     import nodes
 
     if AIMIXER_ROOT.is_dir():
