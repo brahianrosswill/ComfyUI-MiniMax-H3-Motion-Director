@@ -1,3 +1,10 @@
+Third-party source: ComfyUI_MiniMaxH3_Director
+Copyright AIMixer and contributors
+Original license: Apache License 2.0
+Source: https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director
+
+The complete, unmodified license text follows.
+
                                  Apache License
                            Version 2.0, January 2004
                         http://www.apache.org/licenses/

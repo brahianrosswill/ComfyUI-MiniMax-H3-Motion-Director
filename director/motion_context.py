@@ -1,3 +1,8 @@
+# Portions derived from ComfyUI-H3-Motion-Context
+# Copyright (C) 2026 NikoDemon80 and contributors
+# Modified for MiniMax H3 Motion Director, 2026-08-09
+# Licensed under GNU GPL v3.0. See LICENSE and NOTICE.
+
 """Exported-frame MiniMax H3 Motion/Audio Context conditioning."""
 
 from __future__ import annotations

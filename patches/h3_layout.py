@@ -1,3 +1,8 @@
+# Portions derived from ComfyUI-H3-Motion-Context
+# Copyright (C) 2026 NikoDemon80 and contributors
+# Modified for MiniMax H3 Motion Director, 2026-08-09
+# Licensed under GNU GPL v3.0. See LICENSE and NOTICE.
+
 """Lift MiniMax H3's first/last-only keyframe anchor restriction.
 
 Stock ComfyUI builds keyframe conditioning rows at one of two time

@@ -1,3 +1,10 @@
+# Portions derived from ComfyUI_MiniMaxH3_Director
+# Copyright AIMixer and contributors
+# Originally licensed under Apache License 2.0
+# Modified for MiniMax H3 Motion Director, 2026-08-09
+# This derivative project is distributed under GPL-3.0.
+# See NOTICE and LICENSES/Apache-2.0-AIMixer.txt.
+
 """Run MiniMax H3 Motion Director segments through the official ComfyUI core pipeline."""
 
 from __future__ import annotations
@@ -14,6 +21,7 @@ from ..patches import motion_context_patch_status
 from .core_sampling import sample_single_stage
 from .core_sampling import (
     describe_external_sampler,
+    resolve_sampling_mode,
     validate_external_sampling,
 )
 from .frame_align import minimax_align_frame_count, pad_or_trim_frames
@@ -231,7 +239,6 @@ def execute_director_plan_core(
     scheduler: str = "simple",
     shift_video: float = 12.0,
     shift_audio: float = 3.0,
-    sampling_control: str = "internal",
     external_sampler=None,
     external_sigmas=None,
     motion_context_enabled: bool = True,
@@ -242,9 +249,7 @@ def execute_director_plan_core(
     """Process every segment with MiniMax H3 conditioning + single-stage sampling."""
     audio_mode = resolve_audio_mode(plan)
     decode_audio = audio_mode == AUDIO_MODE_GENERATE
-    sampling_mode = str(sampling_control or "internal").strip().lower()
-    if sampling_mode not in {"internal", "external"}:
-        raise ValueError("Motion Director sampling_control must be internal or external.")
+    sampling_mode = resolve_sampling_mode(external_sampler, external_sigmas)
     external_steps = None
     if sampling_mode == "external":
         _, external_steps = validate_external_sampling(
@@ -268,7 +273,7 @@ def execute_director_plan_core(
         "pipeline": "exported_motion_context_v1",
         "seed": int(seed),
         "cfg": float(cfg),
-        "sampling_control": sampling_mode,
+        "sampling_mode": sampling_mode,
         "motion_context_enabled": motion_enabled,
         "context_length": requested_context,
         "audio_context_enabled": audio_context_active,
@@ -325,7 +330,7 @@ def execute_director_plan_core(
     reports.append(f"Motion Context: {'ON' if motion_enabled else 'OFF'}")
     reports.append(f"Context frames: {requested_context}")
     reports.append(f"Audio context: {'ON' if audio_context_active else 'OFF'}")
-    reports.append(f"Sampling control: {sampling_mode}")
+    reports.append(f"Sampling mode: {sampling_mode} (automatic connection detection)")
     if sampling_mode == "internal":
         reports.append(f"Sampler source: internal {sampler}")
         reports.append(f"Sigma source: internal {scheduler} / {int(steps)} steps")
@@ -617,7 +622,6 @@ def execute_director_plan_core(
                 scheduler=scheduler,
                 shift_video=shift_video,
                 shift_audio=shift_audio,
-                sampling_control=sampling_mode,
                 external_sampler=external_sampler,
                 external_sigmas=external_sigmas,
                 on_phase=_report_sample_phase,

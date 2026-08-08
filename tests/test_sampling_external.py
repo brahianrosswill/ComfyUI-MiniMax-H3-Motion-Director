@@ -2,12 +2,67 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import inspect
 
 import pytest
 import torch
 
 import comfy.model_base
 import comfy.model_sampling
+
+
+def test_director_schema_has_no_manual_sampling_control(plugin_package):
+    director_module = importlib.import_module(
+        f"{plugin_package.__name__}.nodes.director"
+    )
+    director = director_module.MiniMaxH3MotionDirector
+    schema = director.INPUT_TYPES()
+    input_names = {
+        name
+        for section in ("required", "optional", "hidden")
+        for name in schema.get(section, {})
+    }
+    assert "sampling_control" not in input_names
+    assert {"sampler", "sigmas"}.issubset(input_names)
+    assert "sampling_control" not in inspect.signature(director.execute).parameters
+
+
+@pytest.mark.parametrize(
+    ("sampler", "sigmas", "expected"),
+    [
+        (None, None, "internal"),
+        (object(), torch.tensor([1.0, 0.0]), "external"),
+    ],
+)
+def test_sampling_mode_is_derived_from_connections(
+    plugin_package, sampler, sigmas, expected
+):
+    sampling = importlib.import_module(
+        f"{plugin_package.__name__}.director.core_sampling"
+    )
+    assert sampling.resolve_sampling_mode(sampler, sigmas) == expected
+
+
+@pytest.mark.parametrize(
+    ("sampler", "sigmas", "connected", "missing"),
+    [
+        (object(), None, "SAMPLER", "SIGMAS"),
+        (None, torch.tensor([1.0, 0.0]), "SIGMAS", "SAMPLER"),
+    ],
+)
+def test_partial_external_sampling_connections_fail_loudly(
+    plugin_package, sampler, sigmas, connected, missing
+):
+    sampling = importlib.import_module(
+        f"{plugin_package.__name__}.director.core_sampling"
+    )
+    with pytest.raises(ValueError) as caught:
+        sampling.resolve_sampling_mode(sampler, sigmas)
+    message = str(caught.value)
+    assert connected in message
+    assert missing in message
+    assert "Connect both" in message
+    assert "disconnect both" in message
 
 
 def test_standard_external_sampler_and_sigmas_validation(plugin_package, monkeypatch):

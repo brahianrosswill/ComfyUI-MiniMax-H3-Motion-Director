@@ -1,3 +1,10 @@
+# Portions derived from ComfyUI_MiniMaxH3_Director
+# Copyright AIMixer and contributors
+# Originally licensed under Apache License 2.0
+# Modified for MiniMax H3 Motion Director, 2026-08-09
+# This derivative project is distributed under GPL-3.0.
+# See NOTICE and LICENSES/Apache-2.0-AIMixer.txt.
+
 """MiniMax H3 Motion Director — timeline UI + official MiniMax H3 AV execution."""
 
 from __future__ import annotations
@@ -127,17 +134,6 @@ class MiniMaxH3MotionDirector:
                     },
                 ),
                 "bd_grp_advanced": ("BDGROUP", {"default": "高级采样"}),
-                "sampling_control": (
-                    ["internal", "external"],
-                    {
-                        "default": "internal",
-                        "tooltip": (
-                            "internal: Director builds sampler/schedule and applies H3 "
-                            "sigma shift. external: use connected standard SAMPLER and "
-                            "SIGMAS without applying another shift."
-                        ),
-                    },
-                ),
                 "steps": (
                     "INT",
                     {
@@ -242,7 +238,6 @@ class MiniMaxH3MotionDirector:
         motion_context_enabled=True,
         context_length=22,
         audio_context_enabled=True,
-        sampling_control="internal",
         steps=25,
         sampler_name="res_multistep",
         scheduler="simple",
@@ -286,7 +281,6 @@ class MiniMaxH3MotionDirector:
             scheduler=scheduler,
             shift_video=shift_video,
             shift_audio=shift_audio,
-            sampling_control=sampling_control,
             external_sampler=sampler,
             external_sigmas=sigmas,
             motion_context_enabled=motion_context_enabled,

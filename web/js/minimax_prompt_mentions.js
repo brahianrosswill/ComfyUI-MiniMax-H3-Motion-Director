@@ -1,4 +1,11 @@
-﻿/** @-mention picker for MiniMax H3 director refs (图片 → <Picture N>, 音频 → <Audio J>). */
+// Portions derived from ComfyUI_MiniMaxH3_Director
+// Copyright AIMixer and contributors
+// Originally licensed under Apache License 2.0
+// Modified for MiniMax H3 Motion Director, 2026-08-09
+// This derivative project is distributed under GPL-3.0.
+// See NOTICE and LICENSES/Apache-2.0-AIMixer.txt.
+
+/** @-mention picker for MiniMax H3 director refs (图片 → <Picture N>, 音频 → <Audio J>). */
 
 import { api } from "../../scripts/api.js";
 import {

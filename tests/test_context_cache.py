@@ -46,7 +46,7 @@ def test_selection_run_restores_exported_context_and_rejects_stale(plugin_packag
     monkeypatch.setattr(cache.folder_paths, "get_output_directory", lambda: str(tmp_path))
     segs = [_segment(0), _segment(1, "continue running")]
     plan = _plan(segs)
-    settings = {"sampling_control": "internal", "seed": 7, "context_length": 22}
+    settings = {"sampling_mode": "internal", "seed": 7, "context_length": 22}
     frames = torch.rand(124, 16, 16, 3)
     audio = {"waveform": torch.rand(1, 2, round(124 / 24 * 32000)), "sample_rate": 32000}
     assert cache.save_motion_context_cache(

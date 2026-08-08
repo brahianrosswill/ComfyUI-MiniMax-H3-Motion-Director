@@ -36,7 +36,6 @@ def test_all_example_workflows_are_valid_json_and_use_unique_node_id():
                 "motion_context_enabled",
                 "context_length",
                 "audio_context_enabled",
-                "sampling_control",
                 "sampler_name",
                 "sampler",
                 "sigmas",
@@ -45,11 +44,16 @@ def test_all_example_workflows_are_valid_json_and_use_unique_node_id():
                 f"{path.name}: workflow still uses the pre-Motion input schema"
             )
             assert names.index("bd_grp_motion") < names.index("bd_grp_advanced")
-            assert names.index("sampling_control") < names.index("steps")
-            assert len(director["widgets_values"]) == 26, (
+            assert "sampling_control" not in names
+            assert len(director["widgets_values"]) == 25, (
                 f"{path.name}: stale widget order or extension-only values remain"
             )
-            assert "internal" in director["widgets_values"] or "external" in director["widgets_values"]
+            assert "internal" not in director["widgets_values"]
+            assert "external" not in director["widgets_values"]
+            inputs = {item["name"]: item for item in director["inputs"]}
+            assert (inputs["sampler"]["link"] is None) == (inputs["sigmas"]["link"] is None), (
+                f"{path.name}: SAMPLER and SIGMAS must both be connected or both empty"
+            )
             assert 22 in director["widgets_values"]
 
 
@@ -73,7 +77,8 @@ def test_external_sampling_example_has_connected_sampler_and_sigmas():
     assert linked_types == {"KSamplerSelect", "BasicScheduler"}
 
     widgets = director["widgets_values"]
-    assert "external" in widgets
+    assert "sampling_control" not in inputs
+    assert "external" not in widgets
     assert 22 in widgets
     assert True in widgets
 

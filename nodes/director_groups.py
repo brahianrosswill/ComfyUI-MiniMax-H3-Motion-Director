@@ -1,3 +1,10 @@
+# Portions derived from ComfyUI_MiniMaxH3_Director
+# Copyright AIMixer and contributors
+# Originally licensed under Apache License 2.0
+# Modified for MiniMax H3 Motion Director, 2026-08-09
+# This derivative project is distributed under GPL-3.0.
+# See NOTICE and LICENSES/Apache-2.0-AIMixer.txt.
+
 """Graph packer nodes: Image to Video / Reference to Video groups for Director."""
 
 from __future__ import annotations

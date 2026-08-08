@@ -1,3 +1,14 @@
+# Portions derived from ComfyUI_MiniMaxH3_Director
+# Copyright AIMixer and contributors
+# Originally licensed under Apache License 2.0
+# Modified for MiniMax H3 Motion Director, 2026-08-09
+# This derivative project is distributed under GPL-3.0.
+# See NOTICE and LICENSES/Apache-2.0-AIMixer.txt.
+# Portions derived from ComfyUI-H3-Motion-Context
+# Copyright (C) 2026 NikoDemon80 and contributors
+# Modified for MiniMax H3 Motion Director, 2026-08-09
+# Licensed under GNU GPL v3.0. See LICENSE and NOTICE.
+
 """MiniMax H3 Motion Director.
 
 Independent GPL-3.0 derivative of AIMixer's Director, with guarded H3 Motion

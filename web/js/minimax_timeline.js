@@ -1,3 +1,10 @@
+// Portions derived from ComfyUI_MiniMaxH3_Director
+// Copyright AIMixer and contributors
+// Originally licensed under Apache License 2.0
+// Modified for MiniMax H3 Motion Director, 2026-08-09
+// This derivative project is distributed under GPL-3.0.
+// See NOTICE and LICENSES/Apache-2.0-AIMixer.txt.
+
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
 import {
@@ -90,6 +97,11 @@ import {
     taskDisplayLabel,
     toggleLocale,
 } from "./minimax_i18n.js";
+import {
+    applySamplingWidgetVisibility,
+    migrateLegacySamplingControlNode,
+    migrateLegacySamplingControlWorkflow,
+} from "./minimax_sampling_ui.js";
 
 const RULER_H = 24;
 const SEG_LABEL_H = 20;
@@ -271,7 +283,6 @@ const DIRECTOR_WIDGET_LABEL_KEYS = {
     motion_context_enabled: "widget.motionContextEnabled",
     context_length: "widget.contextLength",
     audio_context_enabled: "widget.audioContextEnabled",
-    sampling_control: "widget.samplingControl",
     steps: "widget.steps",
     sampler_name: "widget.samplerName",
     scheduler: "widget.scheduler",
@@ -287,7 +298,6 @@ const DIRECTOR_WIDGET_TOOLTIP_KEYS = {
     motion_context_enabled: "widget.tooltip.motionContextEnabled",
     context_length: "widget.tooltip.contextLength",
     audio_context_enabled: "widget.tooltip.audioContextEnabled",
-    sampling_control: "widget.tooltip.samplingControl",
     clear_vram_between_segments: "widget.tooltip.clearVram",
     export_source_images: "widget.tooltip.exportSourceImages",
 };
@@ -329,6 +339,30 @@ function applyDirectorWidgetLabels(node) {
             }
         }
     }
+    refreshSamplingModeUi(node);
+}
+
+function refreshSamplingModeUi(node) {
+    if (!node) return "internal";
+    const state = applySamplingWidgetVisibility(node);
+    const statusKey = state === "external"
+        ? "sampling.status.external"
+        : state === "incomplete"
+            ? "sampling.status.incomplete"
+            : "sampling.status.internal";
+    const label = `${t("widget.grpAdvanced")} · ${t(statusKey)}`;
+    const header = node.widgets?.find((widget) => widget?.name === "bd_grp_advanced");
+    if (header) {
+        header._mmxSamplingStatusText = label;
+        header._bdGroupLabel = label;
+        header.value = label;
+        if (header.element) {
+            header.element.textContent = label;
+            header.element.style.borderLeftColor = state === "incomplete" ? "#ff6b6b" : "#7a9cff";
+        }
+    }
+    node.setDirtyCanvas?.(true, true);
+    return state;
 }
 
 function drawGroupHeader(ctx, node, widget_width, y, H, label) {
@@ -377,7 +411,8 @@ function makeGroupHeaderWidget(inputName, inputData) {
         _mmxGroupI18nKey: i18nKey || null,
         _bdGroupLabel: label,
         draw(ctx, node, widget_width, y, H) {
-            const text = this._mmxGroupI18nKey ? t(this._mmxGroupI18nKey) : (this._bdGroupLabel || label);
+            const text = this._mmxSamplingStatusText
+                || (this._mmxGroupI18nKey ? t(this._mmxGroupI18nKey) : (this._bdGroupLabel || label));
             drawGroupHeader(ctx, node, widget_width, y, H, text);
         },
         computeSize(width) {
@@ -468,7 +503,6 @@ const STYLES = `
 .bd-live-sample-empty.hidden{display:none!important}
 .bd-live-sample-badge{position:absolute;left:10px;bottom:10px;padding:3px 8px;border-radius:999px;background:rgba(0,0,0,.75);color:#cfcfcf;font-size:11px;pointer-events:none}
 .bd-live-sample-badge.hidden{display:none!important}
-.bd-main>.bd-live-sample{margin:0 0 4px}
 .bd-run-select-bar{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:10px;color:#aaa}
 .bd-run-select-all-wrap{display:inline-flex;align-items:center;gap:4px;font-size:11px;color:#aaa;cursor:pointer;user-select:none;margin-left:2px}
 .bd-run-select-all-wrap.hidden{display:none!important}
@@ -1874,13 +1908,12 @@ class MiniMaxH3MotionDirectorEditor {
                 <div class="bd-live-sample-empty" data-r="live-sample-empty" data-i18n="liveSample.waiting">等待采样…</div>
                 <div class="bd-live-sample-badge hidden" data-r="live-sample-badge"></div>
             </div>`;
-        this.mainBody.appendChild(liveSample);
         this.liveSampleEl = liveSample;
         this.liveSampleImg = liveSample.querySelector('[data-r="live-sample-img"]');
         this.liveSampleEmpty = liveSample.querySelector('[data-r="live-sample-empty"]');
         this.liveSampleBadge = liveSample.querySelector('[data-r="live-sample-badge"]');
         this.liveSampleMeta = liveSample.querySelector('[data-r="live-sample-meta"]');
-        this._liveSampleHost = "main";
+        this._liveSampleHost = null;
 
         const bottom = document.createElement("div");
         bottom.className = "bd-split";
@@ -7937,7 +7970,7 @@ class MiniMaxH3MotionDirectorEditor {
 
     _placeLiveSamplePanel() {
         const panel = this.liveSampleEl;
-        if (!panel) return;
+        if (!panel) return false;
 
         if (this.isFl2vMode?.() && this.fl2vUi?.workbench && this.fl2vUi?.shotsEl) {
             this._clearEmbeddedLiveLayoutClasses();
@@ -7945,7 +7978,7 @@ class MiniMaxH3MotionDirectorEditor {
                 this.fl2vUi.workbench.insertBefore(panel, this.fl2vUi.shotsEl);
                 this._liveSampleHost = "fl2v";
             }
-            return;
+            return true;
         }
 
         const layout = this._activePromptLayout();
@@ -7958,7 +7991,7 @@ class MiniMaxH3MotionDirectorEditor {
             this.globalPromptLayout?.classList.remove("bd-rv2v-with-live");
             this.segPromptLayout?.classList.remove("bd-rv2v-with-live");
             this._liveSampleHost = "v2v";
-            return;
+            return true;
         }
 
         // rv2v: preview under the prompt (same stack as r2v right column).
@@ -7971,22 +8004,20 @@ class MiniMaxH3MotionDirectorEditor {
                 this.globalPromptLayout?.classList.remove("bd-v2v-with-live");
                 this.segPromptLayout?.classList.remove("bd-v2v-with-live");
                 this._liveSampleHost = "rv2v";
-                return;
+                return true;
             }
         }
 
         this._clearEmbeddedLiveLayoutClasses();
-        if (this.outputBarEl && (this._liveSampleHost !== "main" || panel.parentElement !== this.mainBody)) {
-            this.outputBarEl.insertAdjacentElement("afterend", panel);
-            this._liveSampleHost = "main";
-        }
+        panel.remove();
+        this._liveSampleHost = null;
+        return false;
     }
 
     updateLiveSamplePanel() {
         const panel = this.liveSampleEl;
         if (!panel) return;
-        const show = this.needsLiveSamplePanel();
-        this._placeLiveSamplePanel();
+        const show = this.needsLiveSamplePanel() && this._placeLiveSamplePanel();
         panel.classList.toggle("hidden", !show);
         if (!show) {
             panel.classList.remove("receiving");
@@ -8019,7 +8050,7 @@ class MiniMaxH3MotionDirectorEditor {
         if (!this.needsLiveSamplePanel()) return;
         const b64 = detail.image_b64 || detail.imageB64 || "";
         if (!b64) return;
-        this._placeLiveSamplePanel();
+        if (!this._placeLiveSamplePanel()) return;
         this.liveSampleEl?.classList.remove("hidden");
         this._liveSampleB64 = b64;
         this._liveSampleStep = detail.step ?? null;
@@ -8892,6 +8923,9 @@ function normalizeDirectorOutputs(node) {
 
 app.registerExtension({
     name: "ComfyUI.MiniMaxH3MotionDirectorPlugin",
+    async beforeConfigureGraph(graphData) {
+        migrateLegacySamplingControlWorkflow(graphData);
+    },
     async setup() {
         const flushDirectors = () => {
             const graph = app.graph ?? app.canvas?.graph;
@@ -8988,6 +9022,7 @@ app.registerExtension({
         ensureDirectorDomWidgetWidth(node);
         bindDirectorDomWidgetSizing(node, node._minimaxDomWidget, () => node._minimaxEditor);
         initDirectorEditor(node);
+        refreshSamplingModeUi(node);
         node._minimaxEditor?.scheduleRender?.();
     },
     async getCustomWidgets() {
@@ -9111,6 +9146,8 @@ app.registerExtension({
         nodeType.prototype.onConnectionsChange = function (...args) {
             const out = onConnectionsChange?.apply(this, args);
             this._minimaxEditor?.syncExternalGroupsTimeline?.();
+            refreshSamplingModeUi(this);
+            queueMicrotask(() => refreshSamplingModeUi(this));
             return out;
         };
 
@@ -9129,10 +9166,12 @@ app.registerExtension({
 
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {
+            migrateLegacySamplingControlNode(arguments[0]);
             normalizeDirectorOutputs(this);
             const out = onConfigure?.apply(this, arguments);
             setTimeout(() => {
                 finalizeDirectorWidgetOrder(this);
+                applyDirectorWidgetLabels(this);
                 const ed = initDirectorEditor(this) || this._minimaxEditor;
                 if (!ed) return;
                 const initTotal = Math.max(0, parseInt(ed.totalFramesWidget?.value || 124, 10));

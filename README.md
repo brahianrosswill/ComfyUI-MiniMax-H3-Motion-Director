@@ -72,9 +72,20 @@ trajectory will not be exported.
 When Motion Context is enabled, it replaces legacy single-last-frame segment
 continuity. Both mechanisms are never applied together.
 
-## Internal sampling
+## Automatic sampling selection
 
-Leave `Sampling Control` at `internal` and use:
+There is no sampling-mode dropdown. Motion Director decides from the two
+optional Advanced Sampling sockets:
+
+| `sampler` | `sigmas` | Actual mode |
+|---|---|---|
+| disconnected | disconnected | internal |
+| connected | connected | external |
+| connected | disconnected | error |
+| disconnected | connected | error |
+
+The Advanced Sampling header shows the read-only result. In internal mode it
+shows `Sampling: internal` and uses:
 
 ```text
 steps          25
@@ -89,7 +100,7 @@ The incoming MODEL keeps all patches. Motion Director applies
 
 ## External Advanced Sampling
 
-Set `Sampling Control` to `external` and connect:
+Connect both external sockets:
 
 ```text
 Load Diffusion Model
@@ -108,7 +119,13 @@ KSamplerSelect ─────────── SAMPLER → Motion Director.sam
 INT value of 8 to `BasicScheduler.steps` for an 8-step schedule.
 
 External mode uses the MODEL and SIGMAS exactly as connected. It does not apply
-Director's internal video/audio shift again.
+Director's internal video/audio shift again. The internal `steps`,
+`sampler_name`, `scheduler`, `shift_video` and `shift_audio` widgets are hidden
+while both sockets are connected; disconnecting both restores the saved values.
+Connecting only one socket is rejected explicitly—there is no silent fallback.
+Workflows saved by an older Motion Director release are migrated when loaded:
+the obsolete `sampling_control` widget is removed and existing input links keep
+their correct target slots.
 
 For the optional Turbo workflow:
 
@@ -180,7 +197,7 @@ Motion Context refuses to run when it detects any of these conditions:
 - invalid H3 temporal grid or insufficient previous frames/audio;
 - more than one marked Motion Audio Context ref;
 - FL2V/keyframe merge conflict;
-- missing external `SAMPLER` or `SIGMAS`;
+- only one of external `SAMPLER` / `SIGMAS` is connected;
 - invalid/non-monotonic SIGMAS;
 - MODEL is not MiniMax H3 `ModelSamplingAV`;
 - external sampler rejects H3's nested AV latent.
@@ -205,7 +222,14 @@ Turbo `SAMPLER` type, and real ComfyUI loading beside installed AIMixer Director
 
 ## Source and license
 
-This GPL-3.0 derivative includes modified Apache-2.0 AIMixer Director code and
-modified GPL-3.0 H3 Motion Context code. Attribution, original license texts and
-exact researched commits are in [NOTICE](NOTICE), [LICENSES](LICENSES) and
+The complete MiniMax H3 Motion Director derivative is distributed under
+[GNU GPL version 3](LICENSE). It contains modified GPL-3.0 code from
+[ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context)
+and modified Apache-2.0 code from
+[ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director).
+The original notices and license texts remain in [NOTICE](NOTICE) and
+[LICENSES](LICENSES); the exact researched revisions are recorded in
 [SOURCE_VERSIONS.md](SOURCE_VERSIONS.md).
+
+This is an independent, substantially modified derivative. It is not an
+official distribution of either upstream project.

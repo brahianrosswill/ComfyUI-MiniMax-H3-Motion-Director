@@ -1,3 +1,10 @@
+# Portions derived from ComfyUI_MiniMaxH3_Director
+# Copyright AIMixer and contributors
+# Originally licensed under Apache License 2.0
+# Modified for MiniMax H3 Motion Director, 2026-08-09
+# This derivative project is distributed under GPL-3.0.
+# See NOTICE and LICENSES/Apache-2.0-AIMixer.txt.
+
 """MiniMax H3 internal sampling and standard external SAMPLER/SIGMAS path."""
 
 from __future__ import annotations
@@ -31,6 +38,22 @@ def describe_external_sampler(sampler) -> str:
     if name:
         return name
     return type(sampler).__name__
+
+
+def resolve_sampling_mode(sampler, sigmas) -> str:
+    """Derive the mode from the two optional Advanced Sampling connections."""
+    has_sampler = sampler is not None
+    has_sigmas = sigmas is not None
+    if has_sampler != has_sigmas:
+        connected = "SAMPLER" if has_sampler else "SIGMAS"
+        missing = "SIGMAS" if has_sampler else "SAMPLER"
+        raise ValueError(
+            "Motion Director Advanced Sampling is incomplete: %s is connected "
+            "but %s is missing. Connect both SAMPLER and SIGMAS for external "
+            "sampling, or disconnect both for internal sampling."
+            % (connected, missing)
+        )
+    return "external" if has_sampler else "internal"
 
 
 def validate_external_sampling(model, sampler, sigmas) -> tuple[torch.Tensor, int]:
@@ -110,7 +133,6 @@ def sample_single_stage(
     steps: int,
     sampler_name: str,
     scheduler: str,
-    sampling_control: str = "internal",
     external_sampler=None,
     external_sigmas=None,
     shift_video: float = 12.0,
@@ -129,9 +151,7 @@ def sample_single_stage(
             on_phase(phase, value)
 
     notify("sample", 0)
-    mode = str(sampling_control or "internal").strip().lower()
-    if mode not in {"internal", "external"}:
-        raise ValueError("Motion Director sampling_control must be internal or external.")
+    mode = resolve_sampling_mode(external_sampler, external_sigmas)
     if mode == "internal":
         shifted = MiniMaxH3SigmaShift.execute(model, float(shift_video), float(shift_audio))
         model_for_sampling = _unpack_node_output(shifted)[0]
@@ -225,6 +245,7 @@ def sample_single_stage(
 
 __all__ = [
     "describe_external_sampler",
+    "resolve_sampling_mode",
     "sample_single_stage",
     "validate_external_sampling",
 ]

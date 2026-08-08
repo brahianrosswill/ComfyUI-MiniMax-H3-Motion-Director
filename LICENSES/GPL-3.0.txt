@@ -1,4 +1,9 @@
-Copyright (C) 2026 NikoDemon80
+Third-party source: ComfyUI-H3-Motion-Context
+Copyright (C) 2026 NikoDemon80 and contributors
+Original license: GNU General Public License, version 3
+Source: https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context
+
+The complete, unmodified license text follows.
 
 GNU GENERAL PUBLIC LICENSE
 Version 3, 29 June 2007

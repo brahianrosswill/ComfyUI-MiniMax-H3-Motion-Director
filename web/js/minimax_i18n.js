@@ -1,3 +1,10 @@
+// Portions derived from ComfyUI_MiniMaxH3_Director
+// Copyright AIMixer and contributors
+// Originally licensed under Apache License 2.0
+// Modified for MiniMax H3 Motion Director, 2026-08-09
+// This derivative project is distributed under GPL-3.0.
+// See NOTICE and LICENSES/Apache-2.0-AIMixer.txt.
+
 /** MiniMax H3 Motion Director UI i18n (zh / en) with localStorage persistence. */
 
 export const LOCALE_STORAGE_KEY = "mmx_motion_director_ui_locale";
@@ -323,7 +330,6 @@ const ZH = {
     "widget.motionContextEnabled": "启用运动上下文",
     "widget.contextLength": "上下文帧数",
     "widget.audioContextEnabled": "延续生成音频",
-    "widget.samplingControl": "采样控制",
     "widget.steps": "采样步数",
     "widget.samplerName": "内置采样器",
     "widget.scheduler": "调度器",
@@ -341,12 +347,14 @@ const ZH = {
     "liveSample.segmentHint": "{unit} {n}",
     "unit.shot": "镜",
     "widget.grpAdvanced": "高级采样",
+    "sampling.status.internal": "采样：内部",
+    "sampling.status.external": "采样：外部",
+    "sampling.status.incomplete": "采样：外接不完整（SAMPLER 与 SIGMAS 必须同时连接）",
     "widget.grpPerf": "性能",
     "widget.controlAfterGenerate": "生成前后定制",
     "widget.tooltip.motionContextEnabled": "第二段起，使用上一段最终导出的尾帧作为真实 H3 运动历史。",
     "widget.tooltip.contextLength": "建议 22 帧；会向下对齐为 H3 支持的 39、22、5 或 1 帧。",
     "widget.tooltip.audioContextEnabled": "仅在生成声音模式下，将上一段导出音频的尾端接入下一段。",
-    "widget.tooltip.samplingControl": "internal 使用节点内置采样；external 使用外接 SAMPLER 与 SIGMAS，且不会重复套用 shift。",
     "widget.tooltip.clearVram": "段间清理显存：每段结束后卸载模型并清空 CUDA 缓存。",
     "widget.tooltip.exportSourceImages": "输出原片对比（时间轴原片帧对比）。默认关以节省内存。",
     "common.upload": "上传",
@@ -693,7 +701,6 @@ const EN = {
     "widget.motionContextEnabled": "Enable Motion Context",
     "widget.contextLength": "Context Frames",
     "widget.audioContextEnabled": "Continue Generated Audio",
-    "widget.samplingControl": "Sampling Control",
     "widget.steps": "Sampling Steps",
     "widget.samplerName": "Internal Sampler",
     "widget.scheduler": "Scheduler",
@@ -711,12 +718,14 @@ const EN = {
     "liveSample.segmentHint": "{unit} {n}",
     "unit.shot": "shot",
     "widget.grpAdvanced": "Advanced sampling",
+    "sampling.status.internal": "Sampling: internal",
+    "sampling.status.external": "Sampling: external",
+    "sampling.status.incomplete": "Sampling: incomplete (connect both SAMPLER and SIGMAS)",
     "widget.grpPerf": "Performance",
     "widget.controlAfterGenerate": "Control after generate",
     "widget.tooltip.motionContextEnabled": "From segment 2 onward, use the previous segment's final exported tail as real H3 motion history.",
     "widget.tooltip.contextLength": "22 frames is recommended; values snap down to an H3-supported run of 39, 22, 5, or 1.",
     "widget.tooltip.audioContextEnabled": "In generated-audio mode, carry the previous exported audio tail into the next segment.",
-    "widget.tooltip.samplingControl": "internal builds sampling here; external uses connected SAMPLER and SIGMAS without applying another shift.",
     "widget.tooltip.clearVram": "Clear VRAM between segments: unload models and empty CUDA cache after each segment.",
     "widget.tooltip.exportSourceImages": "Export source_images (timeline source-frame comparison). Off by default to save memory.",
     "common.upload": "Upload",

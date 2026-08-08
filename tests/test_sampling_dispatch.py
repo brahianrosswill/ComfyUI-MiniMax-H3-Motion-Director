@@ -63,7 +63,6 @@ def test_internal_applies_shift_external_never_double_shifts(plugin_package, mon
         steps=2,
         sampler_name="euler",
         scheduler="simple",
-        sampling_control="internal",
     )
     assert calls == {"shift": 1, "internal": 1, "external": 0}
 
@@ -77,7 +76,6 @@ def test_internal_applies_shift_external_never_double_shifts(plugin_package, mon
         steps=99,
         sampler_name="ignored",
         scheduler="ignored",
-        sampling_control="external",
         external_sampler=object(),
         external_sigmas=torch.tensor([1.0, 0.5, 0.0]),
     )
