@@ -9,11 +9,7 @@
 # Modified for MiniMax H3 Motion Director, 2026-08-09
 # Licensed under GNU GPL v3.0. See LICENSE and NOTICE.
 
-"""MiniMax H3 Motion Director.
-
-Independent GPL-3.0 derivative of AIMixer's Director, with guarded H3 Motion
-Context patches and standard ComfyUI Advanced Sampling inputs.
-"""
+"""MiniMax H3 Motion Director — multi-segment Director with integrated Motion/Audio Context."""
 
 from __future__ import annotations
 

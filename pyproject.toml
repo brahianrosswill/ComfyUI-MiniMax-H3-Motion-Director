@@ -1,6 +1,6 @@
 [project]
 name = "ComfyUI-MiniMax-H3-Motion-Director"
-description = "Multi-segment MiniMax H3 Motion Director with exported Motion/Audio Context and standard Advanced Sampling."
+description = "A MiniMax H3 Director integrating multi-segment generation with Motion and Audio Context continuity."
 version = "0.1.0"
 license = {file = "LICENSE"}
 requires-python = ">=3.10"

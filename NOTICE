@@ -19,16 +19,7 @@ It is a derivative work containing and modifying code from:
    beginning 2026-08-09. The original copyright notice and license text are
    preserved at LICENSES/GPL-3.0.txt.
 
-This project contains substantial modifications and is not the original
-ComfyUI-H3-Motion-Context or AIMixer Director distribution.
-
-Major modifications in this derivative include:
-
-- independent node IDs, custom socket types, frontend extension name, HTTP
-  routes and WebSocket event names so it can coexist with AIMixer Director;
-- multi-reference Motion Audio Context cursor calculation;
-- Motion Context / FL2V start-last keyframe merge;
-- exported-frame and exported-audio context semantics;
-- frame-exact video/audio trimming and versioned selection-run context cache;
-- automatic internal/external dispatch for standard ComfyUI SAMPLER and SIGMAS;
-- guarded startup self-tests and compatibility failure reporting.
+This project substantially modifies and integrates both upstream projects into
+a standalone MiniMax H3 multi-segment Director with Motion/Audio Context
+continuity. It is not the original ComfyUI-H3-Motion-Context or AIMixer Director
+distribution.
