@@ -137,6 +137,9 @@ class DirectorPlan:
     # Runtime executor setting. Stored on the plan so segment/context cache
     # fingerprints cannot reuse outputs from a different source-overlap policy.
     source_overlap_frames: int = 0
+    # Runtime-only Best Cut ownership ranges: segment index -> [start, end).
+    # Kept out of serialized timeline/schema; used by resolved split previews.
+    resolved_source_overlap_ranges: dict[int, tuple[int, int]] = field(default_factory=dict)
     global_ref_audios: list[SegmentRefAudio] = field(default_factory=list)
 
     @property

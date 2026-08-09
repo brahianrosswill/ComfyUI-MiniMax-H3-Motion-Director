@@ -23,6 +23,7 @@ from ..lib.video_io import (
 )
 from .frame_align import pad_or_trim_frames
 from .plan import DirectorPlan
+from .source_overlap import SOURCE_OVERLAP_TASKS, SourceOverlapWindow
 
 
 def needs_source_video(task_key: str) -> bool:
@@ -34,60 +35,125 @@ def is_gen_timeline_plan(plan: DirectorPlan) -> bool:
     return mode in ("gen_blank", "gen_image", "prompt_batch", "image_batch", "fl2v")
 
 
-def effective_source_overlap_frames(
+def _timeline_neighbors(plan: DirectorPlan, seg):
+    ordered = sorted(
+        list(getattr(plan, "segments", None) or []),
+        key=lambda item: int(getattr(item, "timeline_index", item.index)),
+    )
+    position = next(
+        (
+            index
+            for index, candidate in enumerate(ordered)
+            if candidate is seg
+            or int(getattr(candidate, "timeline_index", candidate.index))
+            == int(getattr(seg, "timeline_index", seg.index))
+        ),
+        None,
+    )
+    if position is None:
+        return None, None
+    previous = ordered[position - 1] if position > 0 else None
+    following = ordered[position + 1] if position + 1 < len(ordered) else None
+    return previous, following
+
+
+def _same_overlap_chain(left, right) -> bool:
+    return bool(
+        left is not None
+        and right is not None
+        and getattr(left, "task_key", "") in SOURCE_OVERLAP_TASKS
+        and getattr(right, "task_key", "") in SOURCE_OVERLAP_TASKS
+        and getattr(left, "source_clip", None) is None
+        and getattr(right, "source_clip", None) is None
+        and int(left.end_frame) == int(right.start_frame)
+    )
+
+
+def _available_contiguous_source_frames(
+    plan: DirectorPlan,
+    boundary: int,
+    requested: int,
+    *,
+    direction: int,
+) -> int:
+    requested = max(0, int(requested))
+    if requested <= 0:
+        return 0
+    sv = plan.source_video
+    if is_gen_timeline_plan(plan) and sv is not None and int(sv.shape[0]) > 0:
+        total = int(sv.shape[0])
+        return min(requested, boundary if direction < 0 else max(0, total - boundary))
+
+    total = logical_frame_count(plan.raw)
+    if boundary <= 0 and direction < 0:
+        return 0
+    if boundary >= total and direction > 0:
+        return 0
+    anchor = boundary - 1 if direction > 0 else boundary
+    if anchor < 0 or anchor >= total:
+        return 0
+    clip_index, source_frame = resolve_logical_frame_entry(plan.raw, anchor)
+    actual = 0
+    if direction < 0:
+        expected = source_frame - 1
+        indices = range(boundary - 1, max(-1, boundary - requested - 1), -1)
+    else:
+        expected = source_frame + 1
+        indices = range(boundary, min(total, boundary + requested))
+    for logical_index in indices:
+        next_clip, next_source = resolve_logical_frame_entry(plan.raw, logical_index)
+        if next_clip != clip_index or next_source != expected:
+            break
+        actual += 1
+        expected += direction
+    return actual
+
+
+def effective_source_overlap_window(
     plan: DirectorPlan,
     seg,
     requested_frames: int,
-) -> int:
-    """Return the original-source prefix available to this V2V/RV2V segment.
-
-    Source Overlap is intentionally unavailable for the first timeline slot,
-    other task families, and per-segment generated ``source_clip`` inputs. For
-    edited timelines it also stops at a physical source discontinuity instead
-    of borrowing frames from an unrelated clip.
-    """
+) -> SourceOverlapWindow:
+    """Return the safe bidirectional real-source window for one segment."""
+    nominal_start = max(0, int(seg.start_frame))
+    nominal_end = max(nominal_start, int(seg.end_frame))
     requested = max(0, int(requested_frames))
     if (
         requested <= 0
-        or getattr(seg, "task_key", "") not in {"v2v", "rv2v"}
-        or int(getattr(seg, "timeline_index", 0)) <= 0
+        or getattr(seg, "task_key", "") not in SOURCE_OVERLAP_TASKS
         or getattr(seg, "source_clip", None) is not None
+        or (plan.raw or {}).get("externalGroups", {}).get("active")
     ):
-        return 0
-
-    visible_start = max(0, int(seg.start_frame))
-    if visible_start <= 0:
-        return 0
-
-    sv = plan.source_video
-    if is_gen_timeline_plan(plan) and sv is not None and int(sv.shape[0]) > 0:
-        if visible_start >= int(sv.shape[0]):
-            return 0
-        return min(requested, visible_start)
-
-    if (plan.raw or {}).get("externalGroups", {}).get("active"):
-        return 0
-
-    total = logical_frame_count(plan.raw)
-    if visible_start >= total:
-        return 0
-
-    available = min(requested, visible_start)
-    clip_index, source_frame = resolve_logical_frame_entry(plan.raw, visible_start)
-    actual = 0
-    expected_source_frame = source_frame - 1
-    for logical_index in range(visible_start - 1, visible_start - available - 1, -1):
-        previous_clip, previous_source_frame = resolve_logical_frame_entry(
-            plan.raw, logical_index
+        return SourceOverlapWindow(
+            nominal_start, nominal_end, nominal_start, nominal_end, 0, 0
         )
-        if (
-            previous_clip != clip_index
-            or previous_source_frame != expected_source_frame
-        ):
-            break
-        actual += 1
-        expected_source_frame -= 1
-    return actual
+
+    previous, following = _timeline_neighbors(plan, seg)
+    allow_head = _same_overlap_chain(previous, seg)
+    allow_tail = _same_overlap_chain(seg, following)
+    head_request = requested if allow_head else 0
+    tail_request = requested if allow_tail else 0
+
+    # A very short middle segment must leave strictly ordered cut windows.
+    if head_request and tail_request:
+        per_side_limit = max(0, (nominal_end - nominal_start - 1) // 2)
+        head_request = min(head_request, per_side_limit)
+        tail_request = min(tail_request, per_side_limit)
+
+    head = _available_contiguous_source_frames(
+        plan, nominal_start, head_request, direction=-1
+    )
+    tail = _available_contiguous_source_frames(
+        plan, nominal_end, tail_request, direction=1
+    )
+    return SourceOverlapWindow(
+        source_start=nominal_start - head,
+        source_end=nominal_end + tail,
+        nominal_start=nominal_start,
+        nominal_end=nominal_end,
+        head_overlap=head,
+        tail_overlap=tail,
+    )
 
 
 def resolve_segment_raw_clip(plan: DirectorPlan, seg) -> torch.Tensor:
@@ -175,44 +241,47 @@ def resolve_segment_raw_clip_with_source_overlap(
     plan: DirectorPlan,
     seg,
     *,
-    overlap_frames: int,
+    window: SourceOverlapWindow | None = None,
+    overlap_frames: int | None = None,
     end_extra: int = 0,
 ) -> torch.Tensor:
     """Load one V2V/RV2V reference window from the original source timeline.
 
-    The returned tensor is ``source overlap + visible source + safe lookahead``.
+    The returned tensor is ``head + visible + tail + safe lookahead``.
     It never contains the previous segment's generated output. Forward
     lookahead follows the same physical-continuity rule as the existing H3
     reference preparation, while BOF and clip boundaries reduce the overlap.
     """
-    overlap = effective_source_overlap_frames(plan, seg, overlap_frames)
-    if overlap <= 0:
+    if window is None:
+        window = effective_source_overlap_window(
+            plan, seg, int(overlap_frames or 0)
+        )
+    if window.head_overlap <= 0 and window.tail_overlap <= 0:
         return resolve_segment_raw_clip_with_lookahead(
             plan, seg, end_extra=end_extra
         )
 
     extra = max(0, int(end_extra))
-    visible_start = max(0, int(seg.start_frame))
-    start = visible_start - overlap
-    visible_end = max(visible_start, int(seg.end_frame))
+    start = int(window.source_start)
+    internal_end = int(window.source_end)
 
     sv = plan.source_video
     if is_gen_timeline_plan(plan) and sv is not None and int(sv.shape[0]) > 0:
-        end = min(visible_end + extra, int(sv.shape[0]))
+        end = min(internal_end + extra, int(sv.shape[0]))
         if end > start:
             return sv[start:end].clone()
 
     total = logical_frame_count(plan.raw)
-    visible_end = min(visible_end, total)
-    end = min(visible_end + extra, total)
+    internal_end = min(internal_end, total)
+    end = min(internal_end + extra, total)
 
-    if end > visible_end and visible_end > visible_start:
+    if end > internal_end and internal_end > start:
         clip_index, source_frame = resolve_logical_frame_entry(
-            plan.raw, visible_end - 1
+            plan.raw, internal_end - 1
         )
-        safe_end = visible_end
+        safe_end = internal_end
         expected_source_frame = source_frame + 1
-        for logical_index in range(visible_end, end):
+        for logical_index in range(internal_end, end):
             next_clip, next_source_frame = resolve_logical_frame_entry(
                 plan.raw, logical_index
             )

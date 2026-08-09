@@ -139,8 +139,17 @@ def _align_audio_channels(wave: torch.Tensor, channels: int) -> torch.Tensor:
     return torch.cat([wave, pad], dim=1)
 
 
-def _segment_frame_counts_for_audio(plan, n_audios: int, total_frames: int) -> list[int]:
+def _segment_frame_counts_for_audio(plan, segment_audios: list, total_frames: int) -> list[int]:
     """Per-segment frame lengths used to stitch generated audio under「全部导出」."""
+    resolved = [
+        int(audio.get("frame_count") or 0)
+        if isinstance(audio, dict) and audio.get("source_overlap_resolved")
+        else 0
+        for audio in segment_audios
+    ]
+    if resolved and all(count > 0 for count in resolved) and sum(resolved) == int(total_frames):
+        return resolved
+    n_audios = len(segment_audios)
     segs = list(getattr(plan, "segments", None) or [])
     if len(segs) == n_audios:
         counts = []
@@ -166,22 +175,52 @@ def _merge_generated_segment_audios(
     fps: float,
 ) -> dict[str, Any]:
     """Concatenate per-segment AV audio into one timeline for merged video export."""
+    overlap_sample_rates = {
+        int(gen.get("sample_rate") or 0)
+        for gen in segment_audios
+        if isinstance(gen, dict)
+        and gen.get("source_overlap_resolved")
+        and _audio_has_samples(gen)
+    }
+    if len(overlap_sample_rates) > 1:
+        raise ValueError(
+            "V2V/RV2V Source Overlap generated audio sample rates differ; "
+            "refusing to merge audio at a different cut than video."
+        )
     sr = SILENT_SAMPLE_RATE
     for gen in segment_audios:
         if _audio_has_samples(gen):
             sr = int(gen.get("sample_rate") or sr) or SILENT_SAMPLE_RATE
             break
-    counts = _segment_frame_counts_for_audio(plan, len(segment_audios), total_frames)
+    counts = _segment_frame_counts_for_audio(plan, segment_audios, total_frames)
     parts: list[torch.Tensor] = []
     max_ch = 2
     for i, gen in enumerate(segment_audios):
         fc = counts[i] if i < len(counts) else 0
-        part = _pad_or_trim_audio_to_frames(
-            gen if _audio_has_samples(gen) else None,
-            frame_count=fc,
-            fps=fps,
-            sample_rate=sr,
+        resolved_overlap = bool(
+            isinstance(gen, dict) and gen.get("source_overlap_resolved")
         )
+        if resolved_overlap and _audio_has_samples(gen):
+            part = {
+                "waveform": gen["waveform"],
+                "sample_rate": int(gen.get("sample_rate") or sr),
+            }
+        elif resolved_overlap:
+            start = int(gen.get("source_start") or 0)
+            end = int(gen.get("source_end") or start)
+            start_sample = int(round(start / float(fps) * sr))
+            end_sample = int(round(end / float(fps) * sr))
+            part = {
+                "waveform": torch.zeros(1, 2, max(0, end_sample - start_sample)),
+                "sample_rate": sr,
+            }
+        else:
+            part = _pad_or_trim_audio_to_frames(
+                gen if _audio_has_samples(gen) else None,
+                frame_count=fc,
+                fps=fps,
+                sample_rate=sr,
+            )
         wave = part.get("waveform")
         if isinstance(wave, torch.Tensor) and wave.ndim == 3 and wave.numel() > 0:
             max_ch = max(max_ch, int(wave.shape[1]))
@@ -247,9 +286,16 @@ def build_director_audio_outputs(
             if _audio_has_samples(gen):
                 n_frames = int(getattr(tensor, "shape", [0])[0] or 0)
                 sr = int(gen.get("sample_rate") or SILENT_SAMPLE_RATE)
-                outputs.append(
-                    _pad_or_trim_audio_to_frames(gen, frame_count=n_frames, fps=fps, sample_rate=sr)
-                )
+                if gen.get("source_overlap_resolved"):
+                    outputs.append(
+                        {"waveform": gen["waveform"], "sample_rate": sr}
+                    )
+                else:
+                    outputs.append(
+                        _pad_or_trim_audio_to_frames(
+                            gen, frame_count=n_frames, fps=fps, sample_rate=sr
+                        )
+                    )
             else:
                 outputs.append(empty_audio_dict(SILENT_SAMPLE_RATE))
         if any(_audio_has_samples(a) for a in outputs):

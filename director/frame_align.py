@@ -13,7 +13,7 @@ import torch
 
 
 H3_REFERENCE_VIDEO_PIPELINE = "h3_ref_video_align_up_lookahead_v1"
-H3_SOURCE_OVERLAP_PIPELINE = "v2v_rv2v_source_overlap_v1"
+H3_SOURCE_OVERLAP_PIPELINE = "v2v_rv2v_bidirectional_best_cut_v2"
 
 
 def minimax_align_frame_count(frame_count: int) -> int:

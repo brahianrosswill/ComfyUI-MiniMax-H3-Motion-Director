@@ -131,9 +131,10 @@ class MiniMaxH3MotionDirector:
                         "max": 81,
                         "step": 1,
                         "tooltip": (
-                            "V2V/RV2V only: from Segment 2 onward, prepend up to "
-                            "this many original source-video frames for internal "
-                            "generation, then trim them from the visible output. "
+                            "V2V/RV2V only: generate this many extra original-source "
+                            "frames on both sides of each segment boundary, then find "
+                            "the smoothest cut in the common generated region. Visual "
+                            "Motion Context from the previous generation is not used. "
                             "0 disables Source Overlap."
                         ),
                     },
