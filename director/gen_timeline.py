@@ -106,14 +106,36 @@ def _resolve_gen_image_ref(
     *,
     edit_mode: str,
     global_block: dict,
+    task_key: str = "",
+    segment_index: int = 0,
+    motion_context_enabled: bool = False,
 ) -> dict | None:
-    if edit_mode == "segment":
+    def _segment_ref() -> dict | None:
         img = seg_data.get("genImage") or {}
         if img.get("imageFile") or img.get("imageB64"):
             return img
         if seg_data.get("imageFile"):
             return {"imageFile": seg_data["imageFile"]}
         return None
+
+    # With I2V Motion Context, a global image is only the initial anchor.
+    # Later cards must remain genuinely empty so the executor can continue from
+    # the exported context instead of silently copying the first image.
+    if motion_context_enabled and task_key == "i2v":
+        own = _segment_ref()
+        if own is not None:
+            return own
+        if segment_index > 0:
+            return None
+        img = global_block.get("genImage") or {}
+        if img.get("imageFile") or img.get("imageB64"):
+            return img
+        if global_block.get("imageFile"):
+            return {"imageFile": global_block["imageFile"]}
+        return None
+
+    if edit_mode == "segment":
+        return _segment_ref()
     img = global_block.get("genImage") or {}
     if img.get("imageFile") or img.get("imageB64"):
         return img
@@ -177,18 +199,35 @@ def _build_gen_source_clips(
     width: int,
     output_mode: str,
     ref_max_size: int,
-) -> list[torch.Tensor]:
-    chunks: list[torch.Tensor] = []
-    for _start, end, seg_data in ranges:
+    motion_context_enabled: bool = False,
+) -> list[torch.Tensor | None]:
+    chunks: list[torch.Tensor | None] = []
+    for seg_index, (_start, end, seg_data) in enumerate(ranges):
         frame_count = end - _start
         if frame_count <= 0:
             continue
         if submode == "gen_blank":
             clip = torch.full((frame_count, height, width, 3), 0.5, dtype=torch.float32)
         else:
-            ref = _resolve_gen_image_ref(seg_data, edit_mode=edit_mode, global_block=global_block)
+            ref = _resolve_gen_image_ref(
+                seg_data,
+                edit_mode=edit_mode,
+                global_block=global_block,
+                task_key=task_key,
+                segment_index=seg_index,
+                motion_context_enabled=motion_context_enabled,
+            )
             if ref is None:
-                seg_idx = len(chunks) + 1
+                if motion_context_enabled and task_key == "i2v":
+                    if seg_index == 0:
+                        raise ValueError(
+                            "MiniMax H3 Motion Director:\n"
+                            "I2V Motion Context sequence requires an initial image on Segment 1.\n"
+                            "Later segments may be left empty and will continue from Motion Context."
+                        )
+                    chunks.append(None)
+                    continue
+                seg_idx = seg_index + 1
                 raise ValueError(
                     f"Segment #{seg_idx} has no source image. "
                     "Upload an image in the generation timeline (global or per-segment)."
@@ -238,8 +277,27 @@ def _build_gen_source_video(
             width=width,
             output_mode=output_mode,
             ref_max_size=ref_max_size,
+            motion_context_enabled=False,
         )
     )
+
+
+def _paired_video_audio_entries(video_list: list[dict]) -> list[dict]:
+    """Convert UI ref-video soundtrack paths into indexed audio entries."""
+    out: list[dict] = []
+    for item in video_list or []:
+        if not isinstance(item, dict):
+            continue
+        path = str(item.get("pairedAudioFile") or item.get("paired_audio_file") or "").strip()
+        if not path:
+            continue
+        out.append(
+            {
+                "index": int(item.get("index", item.get("slot", len(out)))),
+                "audioFile": path,
+            }
+        )
+    return out
 
 
 def build_gen_director_plan(
@@ -252,6 +310,7 @@ def build_gen_director_plan(
     width: int,
     height: int,
     ref_max_size: int,
+    motion_context_enabled: bool = True,
 ):
     """Build DirectorPlan for generation timeline modes (lazy import avoids cycles)."""
     from .plan import (
@@ -338,15 +397,20 @@ def build_gen_director_plan(
         width=out_w,
         output_mode=out_mode,
         ref_max_size=ref_max,
+        motion_context_enabled=motion_context_enabled,
     )
     attach_source_clips = is_prompt_batch_timeline(timeline, task_key) and task_key in ("i2i", "i2v")
     if attach_source_clips:
         # Placeholder timeline index only; spatial data comes from each segment's source_clip.
         source_video = torch.full((len(source_clips), 16, 16, 3), 0.5, dtype=torch.float32)
     else:
-        source_video = cat_frames_variable_size(source_clips)
+        source_video = cat_frames_variable_size(
+            [clip for clip in source_clips if clip is not None]
+        )
 
     segments: list[SegmentPlan] = []
+    last_r2v_bundle = None
+    last_r2v_source_index: int | None = None
     for idx, (start, end, seg_data) in enumerate(segment_ranges):
         if edit_mode == "global":
             seg_prompt = prompt
@@ -374,6 +438,7 @@ def build_gen_director_plan(
         seg_refs = segment_refs_for_context(seg_task_key, seg_refs)
         seg_ref_audios = []
         seg_ref_videos = []
+        seg_ref_video_audios = []
         if edit_mode == "global":
             seg_ref_audios = segment_ref_audios_for_context(
                 seg_task_key,
@@ -393,14 +458,52 @@ def build_gen_director_plan(
                     if not any(int(v.get("index", v.get("slot", -1))) == 0 for v in raw_vids if isinstance(v, dict)):
                         raw_vids = [{"index": 0, **legacy}, *list(raw_vids or [])]
                 seg_ref_videos = _load_ref_videos(raw_vids, timeline, seg_len)
-        if seg_task_key in ("r2v", "r2i") and not seg_refs and not seg_ref_videos and not seg_ref_audios:
+                if motion_context_enabled:
+                    seg_ref_video_audios = _load_ref_audios(
+                        _paired_video_audio_entries(list(raw_vids or []))
+                    )
+
+        material_source_index = None
+        material_inherited = False
+        has_r2v_material = bool(
+            seg_refs or seg_ref_videos or seg_ref_audios or seg_ref_video_audios
+        )
+        if motion_context_enabled and seg_task_key == "r2v":
+            if has_r2v_material:
+                last_r2v_bundle = (
+                    list(seg_refs),
+                    list(seg_ref_audios),
+                    list(seg_ref_videos),
+                    list(seg_ref_video_audios),
+                )
+                last_r2v_source_index = idx
+                material_source_index = idx
+            elif idx == 0 or last_r2v_bundle is None:
+                raise ValueError(
+                    "MiniMax H3 Motion Director:\n"
+                    "R2V Motion Context sequence requires an initial reference set on Segment 1.\n"
+                    "Later segments may inherit it automatically."
+                )
+            else:
+                (
+                    seg_refs,
+                    seg_ref_audios,
+                    seg_ref_videos,
+                    seg_ref_video_audios,
+                ) = (list(items) for items in last_r2v_bundle)
+                material_source_index = last_r2v_source_index
+                material_inherited = True
+                has_r2v_material = True
+
+        if seg_task_key in ("r2v", "r2i") and not has_r2v_material:
             log.warning(
                 "gen segment #%d task=%s has no reference media — will behave like "
                 "t2v/t2i. Upload 图片/音频/视频 on this material card.",
                 idx + 1,
                 seg_task_key,
             )
-        seg_source = source_clips[idx].clone() if idx < len(source_clips) else None
+        source_item = source_clips[idx] if idx < len(source_clips) else None
+        seg_source = source_item.clone() if source_item is not None else None
 
         segments.append(
             SegmentPlan(
@@ -414,8 +517,11 @@ def build_gen_director_plan(
                 refs=seg_refs,
                 ref_audios=seg_ref_audios,
                 ref_videos=seg_ref_videos,
+                ref_video_audios=seg_ref_video_audios,
                 negative_prompt=seg_negative,
                 source_clip=seg_source,
+                material_source_index=material_source_index,
+                material_inherited=material_inherited,
             )
         )
 

@@ -263,6 +263,7 @@ class MiniMaxH3MotionDirector:
             height=height,
             ref_max_size=ref_max_size,
             unique_id=unique_id,
+            motion_context_enabled=motion_context_enabled,
             i2v_groups=i2v_groups,
             r2v_groups=r2v_groups,
         )

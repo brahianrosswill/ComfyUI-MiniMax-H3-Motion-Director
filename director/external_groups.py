@@ -276,6 +276,7 @@ def validate_external_group_inputs(
     task_type: str,
     i2v_groups,
     r2v_groups,
+    motion_context_enabled: bool = True,
 ) -> tuple[str, list[dict[str, Any]] | None, str | None]:
     """Return (task_key, groups_or_None, family_or_None). None groups → use UI timeline."""
     i2v_linked = i2v_groups is not None
@@ -319,6 +320,14 @@ def validate_external_group_inputs(
                     "Remove last_frame or switch task to fl2v."
                 )
             if task_key == "i2v" and kind == "t2v":
+                if motion_context_enabled and idx > 0:
+                    continue
+                if motion_context_enabled:
+                    raise ValueError(
+                        "MiniMax H3 Motion Director:\n"
+                        "I2V Motion Context sequence requires an initial image on Segment 1.\n"
+                        "Later segments may be left empty and will continue from Motion Context."
+                    )
                 raise ValueError(
                     f"task_type is i2v but i2v_groups[{idx}] has no first_frame. "
                     "Connect first_frame on that Group node."
@@ -336,6 +345,17 @@ def validate_external_group_inputs(
     for g in r2v:
         if g.get("kind") != "r2v":
             raise ValueError(f"r2v_groups contains a non-r2v group (kind={g.get('kind')!r}).")
+    if motion_context_enabled:
+        first = r2v[0]
+        if not any(
+            first.get(key)
+            for key in ("ref_images", "ref_videos", "ref_video_audios", "ref_audios")
+        ):
+            raise ValueError(
+                "MiniMax H3 Motion Director:\n"
+                "R2V Motion Context sequence requires an initial reference set on Segment 1.\n"
+                "Later segments may inherit it automatically."
+            )
     return task_key, r2v, "r2v"
 
 
@@ -351,6 +371,7 @@ def build_plan_from_external_groups(
     width: int,
     height: int,
     ref_max_size: int,
+    motion_context_enabled: bool = True,
 ):
     from .plan import (
         DirectorPlan,
@@ -369,8 +390,18 @@ def build_plan_from_external_groups(
     fallback_prompt = (
         ((timeline.get("global") or {}).get("prompt") or global_prompt or "")
     ).strip()
+    timeline_segments = list(timeline.get("segments") or [])
+    inheritance_active = bool(
+        motion_context_enabled
+        and ((family == "i2v" and task_key == "i2v") or family == "r2v")
+    )
+    planned_count = (
+        max(len(groups), len(timeline_segments))
+        if inheritance_active
+        else len(groups)
+    )
 
-    indices = _run_selection_filter(timeline, len(groups))
+    indices = _run_selection_filter(timeline, planned_count)
     if not indices:
         raise ValueError("External groups: no groups selected to run.")
 
@@ -378,16 +409,17 @@ def build_plan_from_external_groups(
     # selected cards to 0..N-1 loses Segment N-1's identity, which makes a
     # validated Motion Context cache impossible to restore. Executor.run_indices
     # still guarantees that unselected groups are never sampled.
-    selected = [(i, groups[i]) for i in indices]
-    planned_groups = list(enumerate(groups))
     sample_img = None
-    for _, g in selected:
-        sample_img = g.get("first_frame")
-        if sample_img is None:
-            sample_img = g.get("last_frame")
-        if sample_img is None:
-            refs = g.get("ref_images") or {}
-            sample_img = next(iter(refs.values()), None) if refs else None
+    for src_index in indices:
+        g = groups[src_index] if src_index < len(groups) else None
+        seg_data = timeline_segments[src_index] if src_index < len(timeline_segments) else {}
+        if g is not None:
+            sample_img = g.get("first_frame")
+            if sample_img is None:
+                sample_img = g.get("last_frame")
+            if sample_img is None:
+                refs = g.get("ref_images") or {}
+                sample_img = next(iter(refs.values()), None) if refs else None
         if sample_img is not None:
             break
 
@@ -397,11 +429,23 @@ def build_plan_from_external_groups(
     )
 
     segments: list[SegmentPlan] = []
+    last_r2v_bundle = None
+    last_r2v_source_index: int | None = None
     cursor = 0
-    for plan_idx, (src_index, g) in enumerate(planned_groups):
-        prompt = (g.get("prompt") or "").strip() or fallback_prompt
+    for plan_idx, src_index in enumerate(range(planned_count)):
+        g = groups[src_index] if src_index < len(groups) else None
+        seg_data = timeline_segments[src_index] if src_index < len(timeline_segments) else {}
+        if g is not None:
+            prompt = (g.get("prompt") or "").strip() or fallback_prompt
+            raw_duration = g.get("duration_sec")
+        else:
+            prompt = (seg_data.get("prompt") or "").strip() or fallback_prompt
+            raw_duration = seg_data.get("durationSec") or seg_data.get("duration_sec")
+            if raw_duration is None:
+                raw_frames = seg_data.get("frameCount") or seg_data.get("frame_count") or seg_data.get("length")
+                raw_duration = (float(raw_frames) / fps) if raw_frames else None
         try:
-            dur = float(g.get("duration_sec") or DEFAULT_FL2V_DURATION_SEC)
+            dur = float(raw_duration or DEFAULT_FL2V_DURATION_SEC)
         except (TypeError, ValueError):
             dur = DEFAULT_FL2V_DURATION_SEC
         fc = max(MIN_FL2V_FRAMES, _duration_to_minimax_frames(dur, fps))
@@ -412,9 +456,16 @@ def build_plan_from_external_groups(
         seg_w, seg_h, seg_mode = out_w, out_h, out_mode
 
         if family == "i2v":
-            kind = g["kind"]
-            first = g.get("first_frame")
-            last = g.get("last_frame")
+            if g is not None:
+                kind = g["kind"]
+                first = g.get("first_frame")
+                last = g.get("last_frame")
+            else:
+                # No connected group at this position means continuation. UI
+                # media is not copied into the external graph's material path.
+                first = None
+                last = None
+                kind = "t2v"
             refs: list[SegmentRef] = []
             source_clip = None
             # Prefer per-group kind (t2v / i2v / fl2v) so prompt-only groups stay t2v
@@ -425,6 +476,10 @@ def build_plan_from_external_groups(
                 seg_task_key = task_key
             else:
                 seg_task_key = "t2v"
+            if inheritance_active:
+                # A prompt-only I2V group is still an I2V continuation; it must
+                # not silently downgrade to an independent t2v segment.
+                seg_task_key = "i2v"
 
             if first is not None or last is not None:
                 start_img = (
@@ -460,6 +515,13 @@ def build_plan_from_external_groups(
                         has_start_frame=start_img is not None,
                     )
 
+            if inheritance_active and src_index == 0 and source_clip is None:
+                raise ValueError(
+                    "MiniMax H3 Motion Director:\n"
+                    "I2V Motion Context sequence requires an initial image on Segment 1.\n"
+                    "Later segments may be left empty and will continue from Motion Context."
+                )
+
             segments.append(
                 SegmentPlan(
                     index=plan_idx,
@@ -477,28 +539,54 @@ def build_plan_from_external_groups(
             )
         else:
             # r2v
-            refs = []
-            for idx, tensor in sorted((g.get("ref_images") or {}).items()):
-                fitted = _fit_image(
-                    tensor, width=seg_w, height=seg_h, output_mode=seg_mode, ref_max_size=ref_max
-                )
-                refs.append(SegmentRef(index=int(idx), tensor=fitted[:1].clone()))
-            ref_videos = []
-            for idx, frames in sorted((g.get("ref_videos") or {}).items()):
-                fitted = _fit_image(
-                    frames, width=seg_w, height=seg_h, output_mode=seg_mode, ref_max_size=ref_max
-                )
-                ref_videos.append(
-                    SegmentRefVideo(index=int(idx), tensor=fitted.clone(), video_file="", meta={"external": True})
-                )
-            ref_audios = [
-                SegmentRefAudio(index=int(idx), audio=aud, audio_file="")
-                for idx, aud in sorted((g.get("ref_audios") or {}).items())
-            ]
-            ref_video_audios = [
-                SegmentRefAudio(index=int(idx), audio=aud, audio_file="")
-                for idx, aud in sorted((g.get("ref_video_audios") or {}).items())
-            ]
+            refs: list[SegmentRef] = []
+            ref_videos: list[SegmentRefVideo] = []
+            ref_audios: list[SegmentRefAudio] = []
+            ref_video_audios: list[SegmentRefAudio] = []
+            if g is not None:
+                for idx, tensor in sorted((g.get("ref_images") or {}).items()):
+                    fitted = _fit_image(
+                        tensor, width=seg_w, height=seg_h, output_mode=seg_mode, ref_max_size=ref_max
+                    )
+                    refs.append(SegmentRef(index=int(idx), tensor=fitted[:1].clone()))
+                for idx, frames in sorted((g.get("ref_videos") or {}).items()):
+                    fitted = _fit_image(
+                        frames, width=seg_w, height=seg_h, output_mode=seg_mode, ref_max_size=ref_max
+                    )
+                    ref_videos.append(
+                        SegmentRefVideo(index=int(idx), tensor=fitted.clone(), video_file="", meta={"external": True})
+                    )
+                ref_audios = [
+                    SegmentRefAudio(index=int(idx), audio=aud, audio_file="")
+                    for idx, aud in sorted((g.get("ref_audios") or {}).items())
+                ]
+                ref_video_audios = [
+                    SegmentRefAudio(index=int(idx), audio=aud, audio_file="")
+                    for idx, aud in sorted((g.get("ref_video_audios") or {}).items())
+                ]
+
+            material_source_index = src_index
+            material_inherited = False
+            has_material = bool(refs or ref_videos or ref_audios or ref_video_audios)
+            if inheritance_active:
+                if has_material:
+                    last_r2v_bundle = (
+                        list(refs), list(ref_audios),
+                        list(ref_videos), list(ref_video_audios),
+                    )
+                    last_r2v_source_index = src_index
+                elif src_index == 0 or last_r2v_bundle is None:
+                    raise ValueError(
+                        "MiniMax H3 Motion Director:\n"
+                        "R2V Motion Context sequence requires an initial reference set on Segment 1.\n"
+                        "Later segments may inherit it automatically."
+                    )
+                else:
+                    refs, ref_audios, ref_videos, ref_video_audios = (
+                        list(items) for items in last_r2v_bundle
+                    )
+                    material_source_index = last_r2v_source_index
+                    material_inherited = True
             prompt = reinforce_r2v_prompt(
                 prompt,
                 ref_indices=[r.index for r in refs],
@@ -520,6 +608,8 @@ def build_plan_from_external_groups(
                     ref_video_audios=ref_video_audios,
                     source_clip=None,
                     ui_index=int(src_index),
+                    material_source_index=material_source_index,
+                    material_inherited=material_inherited,
                 )
             )
 
@@ -531,7 +621,8 @@ def build_plan_from_external_groups(
     raw = dict(timeline)
     raw["externalGroups"] = {
         "source": family,
-        "count": len(groups),
+        "count": planned_count,
+        "connectedCount": len(groups),
         "selected": indices,
         "active": True,
     }
@@ -562,7 +653,7 @@ def build_plan_from_external_groups(
         export_mode=export_mode,
         run_indices=(
             None
-            if len(indices) == len(groups)
+            if len(indices) == planned_count
             else frozenset(int(index) for index in indices)
         ),
     )

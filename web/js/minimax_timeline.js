@@ -902,6 +902,24 @@ function hookTaskTypeWidget(node) {
     };
 }
 
+function hookMotionContextWidget(node) {
+    const mw = node.widgets?.find((w) => w.name === "motion_context_enabled");
+    if (!mw || mw._minimaxMotionContextHooked) return;
+    mw._minimaxMotionContextHooked = true;
+    const orig = mw.callback;
+    mw.callback = function (...args) {
+        const r = orig?.apply(this, args);
+        const ed = node._minimaxEditor;
+        if (ed) {
+            ed._externalGroupsSyncSig = null;
+            ed.syncExternalGroupsTimeline?.();
+            ed.renderImageBatchGroups?.();
+            ed.scheduleRender?.();
+        }
+        return r;
+    };
+}
+
 function syncDirectorNodeSize(node, editor) {
     if (editor?.isPlaying) return;
     if (!node?.computeSize) return;
@@ -980,6 +998,7 @@ function initDirectorEditor(node) {
     if (!container) return null;
     try {
         hookTaskTypeWidget(node);
+        hookMotionContextWidget(node);
         node._minimaxEditor = new MiniMaxH3MotionDirectorEditor(node, container, node._minimaxDomWidget);
         ensureDirectorDomWidgetWidth(node);
         bindDirectorDomWidgetSizing(node, node._minimaxDomWidget);
@@ -1326,6 +1345,17 @@ class MiniMaxH3MotionDirectorEditor {
         return this._inputLinkConnected("r2v_groups");
     }
 
+    isMotionContextEnabled() {
+        const raw = this.widget("motion_context_enabled")?.value;
+        return !(
+            raw === false
+            || raw === 0
+            || raw === "0"
+            || String(raw).trim().toLowerCase() === "false"
+            || String(raw).trim().toLowerCase() === "off"
+        );
+    }
+
     updateExternalGroupsBanner() {
         const el = this.externalGroupsMsgEl || this.root?.querySelector('[data-r="external-groups-msg"]');
         if (!el) return;
@@ -1363,7 +1393,11 @@ class MiniMaxH3MotionDirectorEditor {
 
         const mode = this.getDirectorMode?.() || this._directorMode;
         const taskKey = resolveTaskKey(this.getTaskKey?.() || this.taskTypeWidget?.value);
-        const sig = JSON.stringify(specs.map((s) => [
+        const motionInheritance = !!(
+            this.isMotionContextEnabled?.()
+            && (taskKey === "i2v" || taskKey === "r2v")
+        );
+        const sig = JSON.stringify([motionInheritance, (this.timeline.segments || []).length, specs.map((s) => [
             Number(s.durationSec) || 0,
             s.prompt || "",
             s.firstImageFile || "",
@@ -1378,7 +1412,7 @@ class MiniMaxH3MotionDirectorEditor {
                 r.linked ? 1 : 0,
             ].join(":")).join(","),
             (s.refAudios || []).map((r) => `${r.index}:${r.audioFile || ""}`).join(","),
-        ]));
+        ])]);
         if (this._externalGroupsSyncSig === sig) return;
         this._externalGroupsSyncSig = sig;
 
@@ -1407,7 +1441,25 @@ class MiniMaxH3MotionDirectorEditor {
         if (mode === "prompt_batch" || mode === "image_batch" || isPromptBatchTask(taskKey)) {
             const prev = this.timeline.segments || [];
             const isR2v = taskKey === "r2v" || this.hasExternalR2vGroups?.();
-            this.timeline.segments = specs.map((spec, i) => {
+            const plannedCount = motionInheritance ? Math.max(prev.length, specs.length) : specs.length;
+            this.timeline.segments = Array.from({ length: plannedCount }, (_, i) => {
+                const spec = specs[i];
+                if (!spec) {
+                    // With Motion Context ON, disconnected tail cards remain in
+                    // the timeline and supply prompt/duration plus optional
+                    // reset/reference material to the backend planner.
+                    return newBatchSegment({
+                        ...(prev[i] || {}),
+                        id: prev[i]?.id,
+                        durationSec: prev[i]?.durationSec ?? defaultDurationSec(taskKey),
+                        prompt: (prev[i]?.prompt || "").trim(),
+                        refs: isR2v ? [] : (prev[i]?.refs || []),
+                        refAudios: isR2v ? [] : (prev[i]?.refAudios || []),
+                        refVideos: isR2v ? [] : (prev[i]?.refVideos || []),
+                        genImage: { imageFile: "" },
+                        imageFile: "",
+                    });
+                }
                 const firstRef = imageRefFromPath(spec.firstImageFile);
                 const genImage = firstRef
                     || (isR2v ? (prev[i]?.genImage || { imageFile: "" }) : { imageFile: "" });

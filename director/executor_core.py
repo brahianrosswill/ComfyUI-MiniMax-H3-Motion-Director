@@ -412,11 +412,57 @@ def execute_director_plan_core(
         )
 
         target_len = max(1, int(seg.frame_count or plan.total_frames or 124))
+        timeline_slot = int(seg.timeline_index)
+        explicit_i2v_reset = bool(
+            motion_enabled
+            and seg.task_key == "i2v"
+            and timeline_slot > 0
+            and seg.source_clip is not None
+        )
+        i2v_continuation = bool(
+            motion_enabled
+            and seg.task_key == "i2v"
+            and timeline_slot > 0
+            and seg.source_clip is None
+        )
+
+        if motion_enabled and seg.task_key == "i2v":
+            if explicit_i2v_reset:
+                reports.append(
+                    f"Segment {timeline_slot + 1}: explicit I2V image resets incoming "
+                    "Motion Context. Incoming audio context is also skipped."
+                )
+            elif i2v_continuation:
+                reports.append(
+                    f"Segment {timeline_slot + 1}: I2V continuation via Motion Context."
+                )
+            else:
+                reports.append(
+                    f"Segment {timeline_slot + 1}: I2V explicit source image."
+                )
+        elif motion_enabled and seg.task_key == "r2v":
+            source_index = getattr(seg, "material_source_index", None)
+            if getattr(seg, "material_inherited", False) and source_index is not None:
+                reports.append(
+                    f"Segment {timeline_slot + 1}: inherited Reference Set "
+                    f"from Segment {int(source_index) + 1}."
+                )
+            else:
+                qualifier = "new " if timeline_slot > 0 else ""
+                reports.append(
+                    f"Segment {timeline_slot + 1}: explicit {qualifier}Reference Set."
+                )
+
         raw_clip = resolve_segment_raw_clip(plan, seg)
 
         if seg.source_clip is not None:
             body_raw = seg.source_clip
             target_len = max(target_len, int(body_raw.shape[0]))
+        elif i2v_continuation:
+            # The one-frame gray gen timeline is indexing-only. Passing it as
+            # first_frame would turn a Motion Context continuation into an
+            # unrelated gray-image I2V request.
+            body_raw = torch.zeros((0, 16, 16, 3), dtype=torch.float32)
         else:
             body_raw = raw_clip[:target_len] if int(raw_clip.shape[0]) > target_len else raw_clip
 
@@ -430,8 +476,7 @@ def execute_director_plan_core(
 
         context_entry: CachedMotionContext | None = None
         context_span = 0
-        timeline_slot = int(seg.timeline_index)
-        if motion_enabled and timeline_slot > 0:
+        if motion_enabled and timeline_slot > 0 and not explicit_i2v_reset:
             previous_index = timeline_slot - 1
             context_entry = completed_contexts.get(previous_index)
             if context_entry is None:

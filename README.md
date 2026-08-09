@@ -152,6 +152,16 @@ output of the previous segment. Generated Audio continuation is used only when
 the timeline is generating audio; it does not run when the timeline uses source
 audio or mute output.
 
+For I2V with Motion Context enabled, Segment 1 needs an initial image; later
+segments may leave the image slot empty to continue from the preceding Motion
+Context. Adding an image to a later segment starts a new I2V anchor and skips
+the incoming motion/audio context for that segment. For R2V, Segment 1 needs a
+reference bundle; later empty groups inherit the most recent complete explicit
+bundle (images, videos and audio) without merging slots. The same rules apply
+to connected external I2V/R2V groups. With Motion Context disabled, every
+segment keeps the original independent-media validation and behavior. Export
+mode changes only output packaging and does not affect these inheritance rules.
+
 ## Important Notes
 
 - Do **not** enable the standalone

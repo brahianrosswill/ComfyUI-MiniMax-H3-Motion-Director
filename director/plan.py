@@ -94,6 +94,11 @@ class SegmentPlan:
     # When external groups filter by「选择运行」, plan.index is the compact run
     # order (0..N-1) while ui_index keeps the Director timeline card index.
     ui_index: int | None = None
+    # Runtime-only provenance for Motion Context media inheritance. This is not
+    # written back into timeline_data; the effective tensors above remain the
+    # cache identity source.
+    material_source_index: int | None = None
+    material_inherited: bool = False
 
     @property
     def frame_count(self) -> int:
@@ -489,6 +494,7 @@ def build_director_plan(
     width: int,
     height: int,
     ref_max_size: int,
+    motion_context_enabled: bool = True,
 ) -> DirectorPlan:
     timeline: dict = {}
     if timeline_data and timeline_data.strip():
@@ -534,6 +540,7 @@ def build_director_plan(
             width=width,
             height=height,
             ref_max_size=ref_max_size,
+            motion_context_enabled=motion_context_enabled,
         )
 
     frame_map = logical_frame_map(timeline)

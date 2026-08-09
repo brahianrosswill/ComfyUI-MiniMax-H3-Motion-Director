@@ -168,6 +168,7 @@ def prepare_director_plan(
     height: int,
     ref_max_size: int,
     unique_id: str | None,
+    motion_context_enabled: bool = True,
     i2v_groups=None,
     r2v_groups=None,
 ):
@@ -191,14 +192,10 @@ def prepare_director_plan(
         task_type=task_type,
         i2v_groups=i2v_groups,
         r2v_groups=r2v_groups,
+        motion_context_enabled=motion_context_enabled,
     )
 
     if ext_groups is not None and family is not None:
-        report_director_planning(
-            unique_id,
-            len(ext_groups),
-            timeline_segment_total=len(ext_groups),
-        )
         plan = build_plan_from_external_groups(
             ext_groups,
             family=family,
@@ -210,6 +207,13 @@ def prepare_director_plan(
             width=width,
             height=height,
             ref_max_size=ref_max_size,
+            motion_context_enabled=motion_context_enabled,
+        )
+        runnable = len(plan.run_indices) if plan.run_indices is not None else len(plan.segments)
+        report_director_planning(
+            unique_id,
+            runnable,
+            timeline_segment_total=len(plan.segments),
         )
         log.info(
             "MiniMax H3 Motion Director: external %s groups × %d (task=%s) | %s",
@@ -235,6 +239,7 @@ def prepare_director_plan(
         width=width,
         height=height,
         ref_max_size=ref_max_size,
+        motion_context_enabled=motion_context_enabled,
     )
     log.info(plan_summary(plan).replace("\n", " | "))
     return plan

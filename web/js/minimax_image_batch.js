@@ -262,6 +262,8 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-r2v .bd-batch-head b{color:#f0f0f0;font-size:13px;font-weight:650;letter-spacing:.02em}
 .bd-batch-run-check{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f;flex-shrink:0}
 .bd-batch-head-meta{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.bd-batch-material-status{grid-column:1/-1;color:#8fd6ff;background:#102531;border:1px solid #28556a;border-radius:7px;padding:6px 9px;font-size:11px;line-height:1.35}
+.bd-batch-material-status.required{color:#ffbd72;background:#332313;border-color:#725027}
 .bd-batch-fc{display:flex;align-items:center;gap:6px;color:#aaa;font-size:12px}
 .bd-batch-r2v .bd-batch-fc{color:#c8c8c8;font-size:12px;gap:8px;background:#0e0e0e;border:1px solid #2a2a2a;border-radius:8px;padding:5px 10px}
 .bd-batch-fc input{width:72px;background:#181818;border:1px solid #444;border-radius:5px;color:#eee;padding:5px 8px;font-size:13px}
@@ -1451,6 +1453,18 @@ export function renderImageBatchGroups(editor) {
     const isVideo = isVideoBatchTask(key);
     const runningIdx = editor._runHighlightSeg;
     const fps = parseFloat(editor.frameRateWidget?.value || editor.timeline?.frameRate || 24);
+    const motionOn = !!editor.isMotionContextEnabled?.();
+    const hasI2vSource = (seg) => !!(
+        seg?.genImage?.imageFile || seg?.genImage?.imageB64 || seg?.imageFile
+    );
+    const hasR2vMaterial = (seg) => !!(
+        (seg?.refs || []).some((r) => r?.imageFile || r?.imageB64)
+        || (seg?.refAudios || []).some((r) => r?.audioFile || r?.fileName)
+        || (seg?.refVideos || []).some((r) => (
+            r?.videoFile || r?.fileName || r?.previewImageFile
+            || r?.previewImageUrl || r?.linked || r?.pairedAudioFile
+        ))
+    );
 
     if (editor.batchHint) {
         const hintKey = `batch.hint.${key}`;
@@ -1470,7 +1484,7 @@ export function renderImageBatchGroups(editor) {
         ));
         // External graph media may exist as tensors even when UI path sync failed —
         // don't scare users with a false "will degrade to t2v" notice.
-        if (needsRefs && !hasAnyMedia && !externalLocked) {
+        if (needsRefs && !hasAnyMedia && !externalLocked && !motionOn) {
             editor.batchI2vNotice.textContent = t(key === "r2v" ? "batch.notice.r2vNoRefs" : "batch.notice.r2iNoRefs");
             editor.batchI2vNotice.classList.add("visible");
         } else {
@@ -1598,6 +1612,35 @@ export function renderImageBatchGroups(editor) {
         }
         head.appendChild(meta);
         card.appendChild(head);
+
+        if (key === "i2v" || key === "r2v") {
+            const hasExplicitMaterial = key === "i2v"
+                ? hasI2vSource(seg)
+                : hasR2vMaterial(seg);
+            let statusKey = "";
+            let required = false;
+            if (!hasExplicitMaterial && !motionOn) {
+                statusKey = key === "i2v"
+                    ? "batch.material.i2vMissing"
+                    : "batch.material.r2vMissing";
+                required = true;
+            } else if (!hasExplicitMaterial && index === 0) {
+                statusKey = key === "i2v"
+                    ? "batch.material.i2vRequired"
+                    : "batch.material.r2vRequired";
+                required = true;
+            } else if (!hasExplicitMaterial && index > 0) {
+                statusKey = key === "i2v"
+                    ? "batch.material.i2vContinuation"
+                    : "batch.material.r2vInherited";
+            }
+            if (statusKey) {
+                const status = document.createElement("div");
+                status.className = `bd-batch-material-status${required ? " required" : ""}`;
+                status.textContent = t(statusKey);
+                card.appendChild(status);
+            }
+        }
 
         if (variant === "source") {
             const media = document.createElement("div");
