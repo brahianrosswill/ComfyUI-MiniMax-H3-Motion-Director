@@ -102,6 +102,10 @@ import {
     migrateLegacySamplingControlNode,
     migrateLegacySamplingControlWorkflow,
 } from "./minimax_sampling_ui.js";
+import {
+    createDirectorModal,
+    DIRECTOR_LAUNCHER_HEIGHT,
+} from "./minimax_director_modal.js";
 
 const RULER_H = 24;
 const SEG_LABEL_H = 20;
@@ -901,7 +905,6 @@ function hookTaskTypeWidget(node) {
 function syncDirectorNodeSize(node, editor) {
     if (editor?.isPlaying) return;
     if (!node?.computeSize) return;
-    if (editor) editor.updateDomWidgetHeight?.();
     const sz = node.computeSize();
     node.setSize([node.size[0], sz[1]]);
     node.setDirtyCanvas?.(true, true);
@@ -951,18 +954,22 @@ function finalizeDirectorWidgetOrder(node) {
     moveDirectorDomWidgetToEnd(node);
 }
 
-function bindDirectorDomWidgetSizing(node, widget, getEditor) {
-    const minHeight = () => getDirectorUiHeight(getEditor?.());
-    widget.computeSize = (width) => [width, minHeight()];
+function bindDirectorDomWidgetSizing(node, widget) {
+    const minHeight = () => DIRECTOR_LAUNCHER_HEIGHT;
+    widget.computeSize = (width) => [width, DIRECTOR_LAUNCHER_HEIGHT];
     widget.computeLayoutSize = () => ({
-        minHeight: minHeight(),
-        minWidth: DIRECTOR_MIN_WIDTH,
+        minHeight: DIRECTOR_LAUNCHER_HEIGHT,
+        minWidth: 240,
     });
     if (widget.options) {
         widget.options.getMinHeight = minHeight;
     }
     const el = widget.element;
-    if (el) el.style.minHeight = `${minHeight()}px`;
+    if (el) {
+        el.style.height = `${DIRECTOR_LAUNCHER_HEIGHT}px`;
+        el.style.minHeight = `${DIRECTOR_LAUNCHER_HEIGHT}px`;
+        el.style.maxHeight = `${DIRECTOR_LAUNCHER_HEIGHT}px`;
+    }
 }
 
 function initDirectorEditor(node) {
@@ -975,7 +982,7 @@ function initDirectorEditor(node) {
         hookTaskTypeWidget(node);
         node._minimaxEditor = new MiniMaxH3MotionDirectorEditor(node, container, node._minimaxDomWidget);
         ensureDirectorDomWidgetWidth(node);
-        bindDirectorDomWidgetSizing(node, node._minimaxDomWidget, () => node._minimaxEditor);
+        bindDirectorDomWidgetSizing(node, node._minimaxDomWidget);
         syncDirectorNodeSize(node, node._minimaxEditor);
         return node._minimaxEditor;
     } catch (err) {
@@ -1189,7 +1196,7 @@ function parseTimeline(raw, totalFrames, fps) {
 class MiniMaxH3MotionDirectorEditor {
     constructor(node, container, domWidget) {
         this.node = node;
-        this.container = container;
+        this.launcherContainer = container;
         this.domWidget = domWidget;
         this.zoom = 1;
         this.selectedIndex = 0;
@@ -1221,8 +1228,15 @@ class MiniMaxH3MotionDirectorEditor {
         this._playCanvasWidth = 0;
         this._pauseSettling = false;
         this._runHighlightSeg = -1;
+        this._lastRunProgressDetail = null;
+        this._lastRunErrorMessage = null;
         this._modalEl = null;
         this._modalKeyHandler = null;
+        this._directorModalOverlay = null;
+        this._directorModalShell = null;
+        this._directorModalContent = null;
+        this._directorModalOpen = false;
+        this._directorModalKeyHandler = null;
         this._drawWidth = 0;
         this._reorderDropRank = -1;
         this._reorderFromRank = -1;
@@ -1230,6 +1244,32 @@ class MiniMaxH3MotionDirectorEditor {
         this._stageClipIndex = -1;
         this._stageSyncMs = 0;
         this._playHandoff = false;
+
+        this._directorModalController = createDirectorModal({
+            launcherHost: this.launcherContainer,
+            translate: t,
+            toggleLanguage: toggleLocale,
+            hasInternalDialog: () => !!this._modalEl,
+            onOpen: () => {
+                this._directorModalOpen = true;
+                this._resetLayoutStyles();
+                this.applyZoomWidth();
+                this.syncExternalGroupsTimeline?.();
+                this.scheduleSettleRender();
+            },
+            onClose: () => {
+                if (this.isPlaying) this._stopPlay();
+                this._directorModalOpen = false;
+            },
+            onResize: () => this.onDirectorModalResize(),
+        });
+        this._directorModalOverlay = this._directorModalController.overlay;
+        this._directorModalShell = this._directorModalController.shell;
+        this._directorModalContent = this._directorModalController.content;
+        this._directorModalKeyHandler = this._directorModalController.keyHandler;
+        // Existing editor code measures `container`; it now means the page-root modal content,
+        // never the LiteGraph node's compact launcher host.
+        this.container = this._directorModalContent;
 
         for (const w of node.widgets || []) {
             if (HIDDEN_WIDGETS.includes(w.name)) hideWidget(w);
@@ -1461,6 +1501,7 @@ class MiniMaxH3MotionDirectorEditor {
 
     /** Redraw after layout/zoom settles (first mount often measures before the node finishes sizing). */
     scheduleSettleRender() {
+        if (this._directorModalController && !this._directorModalOpen) return;
         this.scheduleRender();
         if (this._settleRenderTimer != null) return;
         this._settleRenderTimer = setTimeout(() => {
@@ -1510,27 +1551,15 @@ class MiniMaxH3MotionDirectorEditor {
 
     updateDomWidgetHeight() {
         const h = getDirectorUiHeight(this);
-        this.container?.style.setProperty("--comfy-widget-min-height", String(h));
-        if (this.container) this.container.style.minHeight = `${h}px`;
-        if (this.domWidget) {
-            this.domWidget.computeSize = (width) => [width, h];
-            if (this.domWidget.options) {
-                this.domWidget.options.getMinHeight = () => getDirectorUiHeight(this);
-            }
-        }
-        // Keep LiteGraph node height in sync. Batch list is scroll-capped, so without
-        // this the node stays tall after height estimates shrink → huge empty region.
-        if (this.node?.computeSize && !this.isPlaying) {
-            const sz = this.node.computeSize();
-            const curH = this.node.size?.[1] || 0;
-            if (sz?.[1] != null && Math.abs(curH - sz[1]) > 2) {
-                this.node.setSize([this.node.size[0], sz[1]]);
-                this.node.setDirtyCanvas?.(true, true);
-            }
-        }
+        // The full content height belongs to the scrollable page modal only. The
+        // LiteGraph DOM widget remains a fixed-height launcher in every mode.
+        this.root?.style.setProperty("--comfy-widget-min-height", `${h}px`);
+        if (this.root) this.root.style.minHeight = `${h}px`;
+        return h;
     }
 
     scheduleRender() {
+        if (this._directorModalController && !this._directorModalOpen) return;
         if (this._renderPending) return;
         this._renderPending = true;
         this._resizeRaf = requestAnimationFrame(() => {
@@ -1765,7 +1794,6 @@ class MiniMaxH3MotionDirectorEditor {
                     <span class="bd-video-tag" data-r="video-name" data-i18n="toolbar.noVideo">未上传视频</span>
                 </div>
                 <div class="bd-right">
-                    <button type="button" class="bd-btn" data-a="lang-toggle" data-i18n="toolbar.langToggle" data-i18n-title="toolbar.langToggleTitle">EN</button>
                     <div class="bd-bounds" data-r="bounds">起点: 0.00 | 终点: -</div>
                     <div class="bd-timecode" data-r="timecode">0.00s</div>
                 </div>
@@ -1775,7 +1803,6 @@ class MiniMaxH3MotionDirectorEditor {
         this.root.appendChild(toolbarWrap);
         this.smartSplitMsgEl = toolbarWrap.querySelector('[data-r="smart-split-msg"]');
         this.externalGroupsMsgEl = toolbarWrap.querySelector('[data-r="external-groups-msg"]');
-        this.langToggleBtn = toolbarWrap.querySelector('[data-a="lang-toggle"]');
 
         this.mainBody = document.createElement("div");
         this.mainBody.className = "bd-main";
@@ -2173,7 +2200,6 @@ class MiniMaxH3MotionDirectorEditor {
         bind('[data-a="del"]', () => this.deleteSelectedSegment());
         bind('[data-a="mode-global"]', () => this.setEditMode("global"));
         bind('[data-a="mode-segment"]', () => this.setEditMode("segment"));
-        bind('[data-a="lang-toggle"]', () => toggleLocale());
         bind('[data-a="play"]', () => this.togglePlay());
         bind('[data-a="loop"]', () => this.toggleLoop());
         bind('[data-a="live-tae-preview"]', () => this.toggleLiveTaePreview());
@@ -2416,6 +2442,8 @@ class MiniMaxH3MotionDirectorEditor {
     }
 
     destroy() {
+        if (this._destroyed) return;
+        this._destroyed = true;
         clearTimeout(this._syncTimer);
         clearTimeout(this._settleRenderTimer);
         clearTimeout(this._settleRenderLateTimer);
@@ -2427,6 +2455,13 @@ class MiniMaxH3MotionDirectorEditor {
         this._unsubLocale?.();
         this._unsubLocale = null;
         this._closeBdModal();
+        this._directorModalController?.destroy();
+        this._directorModalController = null;
+        this._directorModalOverlay = null;
+        this._directorModalShell = null;
+        this._directorModalContent = null;
+        this._directorModalKeyHandler = null;
+        this._directorModalOpen = false;
         this._previewVideo?.remove();
         this._previewVideo = null;
         window.removeEventListener("mousemove", this._onMouseMove);
@@ -2434,6 +2469,7 @@ class MiniMaxH3MotionDirectorEditor {
         this.canvas?.removeEventListener("mousemove", this._onCanvasHover);
         this.canvas?.classList.remove("bd-grab", "bd-grabbing");
         window.removeEventListener("keydown", this._onKeyDown, true);
+        if (this.node?._minimaxEditor === this) this.node._minimaxEditor = null;
     }
 
     widget(name) { return this.node.widgets?.find((w) => w.name === name); }
@@ -4194,6 +4230,7 @@ class MiniMaxH3MotionDirectorEditor {
     }
 
     applyLocale() {
+        this._directorModalController?.updateLocale();
         this.root?.classList.toggle("locale-en", getLocale() === "en");
         this.root?.classList.toggle("locale-zh", getLocale() !== "en");
         applyI18nDom(this.root);
@@ -4226,6 +4263,11 @@ class MiniMaxH3MotionDirectorEditor {
             }
         }
         if (taskUsesReferenceAudios(this.getTaskKey())) this.renderRefAudioSlots?.();
+        if (this._lastRunProgressDetail) {
+            this.setRunProgress(this._lastRunProgressDetail);
+        } else if (this._lastRunErrorMessage != null) {
+            this.setRunError(this._lastRunErrorMessage);
+        }
         this.scheduleRender?.();
         this.node?.setDirtyCanvas?.(true, true);
     }
@@ -5673,6 +5715,13 @@ class MiniMaxH3MotionDirectorEditor {
     }
 
     onNodeResize() {
+        // Node resizing only affects the compact launcher; editor layout follows
+        // the page-root modal's own ResizeObserver/window resize events.
+        this.node?.setDirtyCanvas?.(true, true);
+    }
+
+    onDirectorModalResize() {
+        if (!this._directorModalOpen) return;
         if (this.isPlaying || this._pauseSettling) return;
         this._resetLayoutStyles();
         this.applyZoomWidth();
@@ -6975,6 +7024,7 @@ class MiniMaxH3MotionDirectorEditor {
     }
 
     render() {
+        if (this._directorModalController && !this._directorModalOpen) return;
         if (this.isPlaying) {
             this.renderTimelineOnly();
             return;
@@ -6992,6 +7042,7 @@ class MiniMaxH3MotionDirectorEditor {
     }
 
     renderTimelineOnly() {
+        if (this._directorModalController && !this._directorModalOpen) return;
         const width = this._measureDrawWidth()
             || this.node?.size?.[0]
             || 0;
@@ -8088,6 +8139,8 @@ class MiniMaxH3MotionDirectorEditor {
 
     setRunProgress(detail) {
         if (!this.runStatusEl) return;
+        this._lastRunProgressDetail = { ...detail };
+        this._lastRunErrorMessage = null;
         const timelineTotal = this.timeline?.segments?.length || 0;
         const runTotal = Math.max(detail.segment_total || this.getRunProgressSegmentTotal(), 1);
         const runSeg = Math.max(1, detail.segment || 1);
@@ -8172,6 +8225,8 @@ class MiniMaxH3MotionDirectorEditor {
 
     clearRunProgress(title, detail) {
         if (!this.runStatusEl) return;
+        this._lastRunProgressDetail = null;
+        this._lastRunErrorMessage = null;
         this.runStatusEl.className = "bd-run-status idle";
         this.runTitleEl.textContent = title || t("run.titleIdle");
         this.runDetailEl.textContent = detail || t("run.detailIdle");
@@ -8185,6 +8240,8 @@ class MiniMaxH3MotionDirectorEditor {
 
     setRunError(message) {
         if (!this.runStatusEl) return;
+        this._lastRunProgressDetail = null;
+        this._lastRunErrorMessage = message || "";
         this.runStatusEl.className = "bd-run-status error";
         this.runTitleEl.textContent = t("run.titleError");
         this.runDetailEl.textContent = message || t("run.detailError");
@@ -9020,7 +9077,7 @@ app.registerExtension({
         if (!node._minimaxDomWidget) return;
         finalizeDirectorWidgetOrder(node);
         ensureDirectorDomWidgetWidth(node);
-        bindDirectorDomWidgetSizing(node, node._minimaxDomWidget, () => node._minimaxEditor);
+        bindDirectorDomWidgetSizing(node, node._minimaxDomWidget);
         initDirectorEditor(node);
         refreshSamplingModeUi(node);
         node._minimaxEditor?.scheduleRender?.();
@@ -9077,7 +9134,7 @@ app.registerExtension({
             // ComfyUI may attach seed's control_after_generate combo after onNodeCreated.
             queueMicrotask(() => applyDirectorWidgetLabels(this));
             setTimeout(() => applyDirectorWidgetLabels(this), 0);
-            this.size = [1000, 680];
+            this.size = [620, 420];
 
             // Idempotent: avoid a second DOM stack if onNodeCreated is wrapped twice.
             if (this._minimaxDomWidget?.element) {
@@ -9090,13 +9147,14 @@ app.registerExtension({
 
             const container = document.createElement("div");
             container.className = "mmx-host";
-            container.style.minHeight = `${getDirectorUiHeight(null)}px`;
-            container.style.setProperty("--comfy-widget-min-height", String(getDirectorUiHeight(null)));
+            container.style.height = `${DIRECTOR_LAUNCHER_HEIGHT}px`;
+            container.style.minHeight = `${DIRECTOR_LAUNCHER_HEIGHT}px`;
+            container.style.maxHeight = `${DIRECTOR_LAUNCHER_HEIGHT}px`;
             const self = this;
             const widget = this.addDOMWidget("minimax_motion_director_ui", "director", container, {
                 getValue: () => "",
                 setValue: () => {},
-                getMinHeight: () => getDirectorUiHeight(self._minimaxEditor),
+                getMinHeight: () => DIRECTOR_LAUNCHER_HEIGHT,
                 hideOnZoom: false,
                 onDraw() {
                     if (self._minimaxEditor?.isPlaying) return;
@@ -9108,7 +9166,7 @@ app.registerExtension({
                     self._minimaxEditor?.onNodeResize?.();
                 },
             });
-            bindDirectorDomWidgetSizing(self, widget, () => self._minimaxEditor);
+            bindDirectorDomWidgetSizing(self, widget);
             widget.element = container;
             ensureDirectorDomWidgetWidth(self);
             self._minimaxDomWidget = widget;
@@ -9161,6 +9219,7 @@ app.registerExtension({
         const onRemoved = nodeType.prototype.onRemoved;
         nodeType.prototype.onRemoved = function () {
             this._minimaxEditor?.destroy();
+            this._minimaxEditor = null;
             return onRemoved?.apply(this, arguments);
         };
 
