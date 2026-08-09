@@ -24,7 +24,12 @@ from .core_sampling import (
     resolve_sampling_mode,
     validate_external_sampling,
 )
-from .frame_align import minimax_align_frame_count, pad_or_trim_frames
+from .frame_align import (
+    H3_REFERENCE_VIDEO_PIPELINE,
+    minimax_align_frame_count,
+    pad_or_trim_frames,
+    prepare_h3_reference_video_clip,
+)
 from .audio_trim import audio_has_samples, trim_segment_av
 from .context_cache import (
     CachedMotionContext,
@@ -46,6 +51,7 @@ from .audio_export import (
 from .segment_runtime import (
     frames_label,
     resolve_segment_raw_clip,
+    resolve_segment_raw_clip_with_lookahead,
     segment_passthrough_chunk,
     tensor_frame_to_jpeg_b64,
 )
@@ -139,6 +145,7 @@ def _build_minimax_inputs(
     seg,
     *,
     clip_frames: torch.Tensor | None,
+    reference_clip_frames: torch.Tensor | None,
     ctx_w: int,
     ctx_h: int,
     prev_tail: torch.Tensor | None,
@@ -195,7 +202,21 @@ def _build_minimax_inputs(
                 f"{task_key} segment #{seg.index + 1} has no source frames. "
                 "Upload a video in the Director timeline before running."
             )
-        ref_videos = {"ref_video_0": clip_frames}
+        if reference_clip_frames is None:
+            raise RuntimeError(
+                "MiniMax H3 Motion Director internal error: "
+                f"{task_key.upper()} <Video 1> reference clip was not prepared."
+            )
+        reference_count = int(reference_clip_frames.shape[0])
+        if reference_count < 5 or reference_count % 17 != 5:
+            raise RuntimeError(
+                "MiniMax H3 Motion Director internal error:\n"
+                f"{task_key.upper()} <Video 1> was prepared with "
+                f"{reference_count} frames.\n"
+                "Reference video must satisfy 17k+5 before entering "
+                "MiniMaxH3ReferenceToVideo."
+            )
+        ref_videos = {"ref_video_0": reference_clip_frames}
         if task_key == "rv2v":
             # Refs are optional per segment: with refs → <Video 1>+<Picture N>;
             # without refs → same as v2v (source edit only).
@@ -281,6 +302,8 @@ def execute_director_plan_core(
         "model_class": type(getattr(model, "model", None)).__name__,
         "model_options": _stable_cache_value(getattr(model, "model_options", {}) or {}),
     }
+    if any(seg.task_key in {"v2v", "rv2v"} for seg in plan.segments):
+        cache_settings["reference_video_pipeline"] = H3_REFERENCE_VIDEO_PIPELINE
     if sampling_mode == "internal":
         cache_settings.update(
             {
@@ -469,11 +492,57 @@ def execute_director_plan_core(
 
         if body_raw is not None and body_raw.shape[0] > 0:
             if plan.output_mode == "fixed":
-                clip_frames = fit_canvas(body_raw, plan.width, plan.height)
+                visible_clip_frames = fit_canvas(body_raw, plan.width, plan.height)
             else:
-                clip_frames = fit_video_long_edge(body_raw, plan.ref_max_size)
+                visible_clip_frames = fit_video_long_edge(body_raw, plan.ref_max_size)
         else:
-            clip_frames = None
+            visible_clip_frames = None
+
+        reference_clip_frames = None
+        if seg.task_key in {"v2v", "rv2v"}:
+            reference_target_frames = minimax_align_frame_count(target_len)
+            requested_lookahead = max(0, reference_target_frames - target_len)
+            if requested_lookahead > 0:
+                reference_raw = resolve_segment_raw_clip_with_lookahead(
+                    plan,
+                    seg,
+                    end_extra=requested_lookahead,
+                )
+            else:
+                reference_raw = body_raw.clone()
+
+            reference_raw_count = int(reference_raw.shape[0])
+            visible_source_count = int(body_raw.shape[0])
+            prepared_reference_raw, reference_tail_pad = (
+                prepare_h3_reference_video_clip(
+                    reference_raw,
+                    reference_target_frames,
+                )
+            )
+            reference_lookahead = max(
+                0,
+                min(reference_raw_count, reference_target_frames)
+                - min(visible_source_count, target_len),
+            )
+            if plan.output_mode == "fixed":
+                reference_clip_frames = fit_canvas(
+                    prepared_reference_raw,
+                    plan.width,
+                    plan.height,
+                )
+            else:
+                reference_clip_frames = fit_video_long_edge(
+                    prepared_reference_raw,
+                    plan.ref_max_size,
+                )
+            reports.append(
+                f"Segment {timeline_slot + 1} {seg.task_key.upper()}:\n"
+                f"visible source = {visible_source_count} frames\n"
+                f"<Video 1> H3 reference = "
+                f"{int(reference_clip_frames.shape[0])} frames\n"
+                f"reference lookahead = {reference_lookahead} frames\n"
+                f"reference tail pad = {reference_tail_pad} frames"
+            )
 
         context_entry: CachedMotionContext | None = None
         context_span = 0
@@ -514,12 +583,12 @@ def execute_director_plan_core(
                 )
         generation_request = target_len + context_span
         num_frames = minimax_align_frame_count(generation_request)
-        if clip_frames is not None:
+        if visible_clip_frames is not None:
             # Motion over-generation belongs to the target timeline, not to a
             # user's source/reference video. Keep reference preparation at the
             # requested segment duration.
-            clip_frames, _ = prepare_segment_clip(
-                clip_frames, minimax_align_frame_count(target_len)
+            visible_clip_frames, _ = prepare_segment_clip(
+                visible_clip_frames, minimax_align_frame_count(target_len)
             )
 
         prev_tail = None
@@ -530,8 +599,9 @@ def execute_director_plan_core(
 
         ctx_w = plan.width
         ctx_h = plan.height
-        if clip_frames is not None and clip_frames.shape[0] > 0:
-            ctx_h, ctx_w = int(clip_frames.shape[1]), int(clip_frames.shape[2])
+        if visible_clip_frames is not None and visible_clip_frames.shape[0] > 0:
+            ctx_h = int(visible_clip_frames.shape[1])
+            ctx_w = int(visible_clip_frames.shape[2])
 
         report_director_progress(
             node_id, segment_index=progress_index, segment_total=seg_total,
@@ -579,7 +649,13 @@ def execute_director_plan_core(
         )
 
         first_frame, last_frame, ref_images, ref_videos, ref_audios, ref_video_audios = _build_minimax_inputs(
-            plan, seg, clip_frames=clip_frames, ctx_w=ctx_w, ctx_h=ctx_h, prev_tail=prev_tail,
+            plan,
+            seg,
+            clip_frames=visible_clip_frames,
+            reference_clip_frames=reference_clip_frames,
+            ctx_w=ctx_w,
+            ctx_h=ctx_h,
+            prev_tail=prev_tail,
         )
 
         if seg.task_key in {"r2v", "v2v", "rv2v"} and (

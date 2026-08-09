@@ -24,6 +24,7 @@ import torch
 
 import folder_paths
 
+from .frame_align import H3_REFERENCE_VIDEO_PIPELINE
 from .plan import DirectorPlan, SegmentPlan
 
 log = logging.getLogger("ComfyUI-MiniMax-H3-Motion-Director.director.cache")
@@ -55,7 +56,7 @@ def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str,
         or seg.reference_video_meta.get("fileName")
         or ""
     ).strip()
-    return {
+    fingerprint = {
         "index": seg.index,
         "start": seg.start_frame,
         "end": seg.end_frame,
@@ -76,6 +77,9 @@ def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str,
         # Bump when continuity sampling/handoff semantics change (invalidates stale segs).
         "continuity_pipeline": "minimax_h3_lastframe_v1",
     }
+    if seg.task_key in {"v2v", "rv2v"}:
+        fingerprint["reference_video_pipeline"] = H3_REFERENCE_VIDEO_PIPELINE
+    return fingerprint
 
 
 def _safe_unlink(path: Path) -> bool:

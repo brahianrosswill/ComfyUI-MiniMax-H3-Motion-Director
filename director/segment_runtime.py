@@ -16,7 +16,11 @@ import torch
 from PIL import Image
 
 from ..lib.image_prep import fit_canvas, fit_video_long_edge
-from ..lib.video_io import load_timeline_segment
+from ..lib.video_io import (
+    load_timeline_segment,
+    logical_frame_count,
+    resolve_logical_frame_entry,
+)
 from .frame_align import pad_or_trim_frames
 from .plan import DirectorPlan
 
@@ -79,11 +83,33 @@ def resolve_segment_raw_clip_with_lookahead(
         if end > start:
             return sv[start:end].clone()
 
-    from ..lib.video_io import logical_frame_count
-
     total = logical_frame_count(plan.raw)
-    end = min(end, total)
     start = max(0, int(seg.start_frame))
+    visible_end = min(max(start, int(seg.end_frame)), total)
+    end = min(max(visible_end, end), total)
+
+    # Conditioning lookahead may continue only through sequential frames from
+    # the same physical source clip. At a file boundary (or an edited source
+    # jump), stop and let the dedicated H3 reference helper pad the tail.
+    if end > visible_end and visible_end > start:
+        clip_index, source_frame = resolve_logical_frame_entry(
+            plan.raw, visible_end - 1
+        )
+        safe_end = visible_end
+        expected_source_frame = source_frame + 1
+        for logical_index in range(visible_end, end):
+            next_clip, next_source_frame = resolve_logical_frame_entry(
+                plan.raw, logical_index
+            )
+            if (
+                next_clip != clip_index
+                or next_source_frame != expected_source_frame
+            ):
+                break
+            safe_end = logical_index + 1
+            expected_source_frame += 1
+        end = safe_end
+
     if end <= start:
         return resolve_segment_raw_clip(plan, seg)
     return load_timeline_segment(plan.raw, start, end)
