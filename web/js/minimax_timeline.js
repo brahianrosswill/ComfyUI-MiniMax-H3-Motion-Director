@@ -89,11 +89,12 @@ import {
 } from "./minimax_fl2v.js";
 import { mountPromptImageMentions } from "./minimax_prompt_mentions.js";
 import {
-    SOURCE_BRIDGE_FIXED_FRAMES,
+    VIDEO_CONTINUITY_STRATEGIES,
+    applyVideoStrategyToWidgets,
     normalizeSourceBridgeValue,
-    notifyWidgetValueChange,
     resolveContinuityUiState,
     restoreDisabledWidgetValue,
+    setWidgetVisibility,
     syncDisabledWidgetState,
 } from "./minimax_continuity_ui.mjs";
 import {
@@ -357,24 +358,6 @@ function applyDirectorWidgetLabels(node) {
     refreshDirectorContinuityUi(node);
 }
 
-function directorBoolValue(value) {
-    if (value === false || value === 0 || value == null) return false;
-    const text = String(value).trim().toLowerCase();
-    return text !== "" && text !== "0" && text !== "false" && text !== "off";
-}
-
-function formatContinuityStatus(state) {
-    const vars = state.status || {};
-    const detailKey = {
-        single: "widget.continuityStatus.single",
-        motion: "widget.continuityStatus.motion",
-        bridge: "widget.continuityStatus.bridge",
-        none: "widget.continuityStatus.none",
-    }[vars.key] || "widget.continuityStatus.none";
-    const separator = getLocale() === "en" ? ": " : "：";
-    return `${t("widget.continuityActive")}${separator}${t(detailKey, vars)}`;
-}
-
 function drawContinuityToggle(ctx, width, y, label, checked, enabled) {
     const margin = 10;
     const rowH = 24;
@@ -409,6 +392,39 @@ function drawContinuityToggle(ctx, width, y, label, checked, enabled) {
     return [margin, y + 1, width - margin * 2, rowH - 2];
 }
 
+function drawContinuityValueRow(ctx, width, y, label, value, dropdown = false) {
+    const margin = 10;
+    const rowH = 24;
+    ctx.save();
+    ctx.fillStyle = "#252525";
+    ctx.strokeStyle = "#555";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(margin, y + 1, width - margin * 2, rowH - 2, 5);
+    else ctx.rect(margin, y + 1, width - margin * 2, rowH - 2);
+    ctx.fill();
+    ctx.stroke();
+    ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "left";
+    ctx.fillStyle = "#d8dce8";
+    ctx.fillText(label, margin + 12, y + rowH / 2);
+    ctx.textAlign = "right";
+    ctx.fillStyle = "#b9c4dc";
+    ctx.fillText(value, width - margin - (dropdown ? 24 : 12), y + rowH / 2);
+    if (dropdown) {
+        ctx.fillStyle = "#9da7bc";
+        ctx.beginPath();
+        ctx.moveTo(width - margin - 16, y + 10);
+        ctx.lineTo(width - margin - 8, y + 10);
+        ctx.lineTo(width - margin - 12, y + 15);
+        ctx.closePath();
+        ctx.fill();
+    }
+    ctx.restore();
+    return [margin, y + 1, width - margin * 2, rowH - 2];
+}
+
 function pointInBounds(pos, bounds) {
     return !!bounds
         && pos[0] >= bounds[0]
@@ -437,6 +453,86 @@ function setContinuityWidgetEnabled(widget, enabled) {
     syncDisabledWidgetState(widget, enabled);
 }
 
+function captureContinuityRenderer(widget) {
+    if (!widget || widget._mmxContinuityRendererSnapshot) return;
+    widget._mmxContinuityRendererSnapshot = {
+        draw: widget.draw,
+        mouse: widget.mouse,
+    };
+}
+
+function restoreContinuityRenderer(widget) {
+    if (!widget?._mmxContinuityRendererSnapshot) return;
+    const snapshot = widget._mmxContinuityRendererSnapshot;
+    if (snapshot.draw === undefined) delete widget.draw;
+    else widget.draw = snapshot.draw;
+    if (snapshot.mouse === undefined) delete widget.mouse;
+    else widget.mouse = snapshot.mouse;
+}
+
+function continuityStrategyLabel(strategy) {
+    if (strategy === VIDEO_CONTINUITY_STRATEGIES.SOURCE_BRIDGE) {
+        return t("widget.strategy.sourceBridge");
+    }
+    if (strategy === VIDEO_CONTINUITY_STRATEGIES.MOTION_CONTEXT) {
+        return t("widget.strategy.motionContext");
+    }
+    return t("widget.strategy.off");
+}
+
+function applyVideoContinuityStrategy(node, strategy, callbackArgs = []) {
+    const source = node.widgets?.find((w) => w.name === "source_overlap_frames");
+    const motion = node.widgets?.find((w) => w.name === "motion_context_enabled");
+    if (!source || !motion) return;
+    applyVideoStrategyToWidgets({
+        node,
+        sourceWidget: source,
+        motionWidget: motion,
+        strategy,
+        callbackArgs,
+    });
+    refreshDirectorContinuityUi(node);
+}
+
+function openContinuityStrategyMenu(event, pos, node) {
+    const strategies = [
+        VIDEO_CONTINUITY_STRATEGIES.SOURCE_BRIDGE,
+        VIDEO_CONTINUITY_STRATEGIES.MOTION_CONTEXT,
+        VIDEO_CONTINUITY_STRATEGIES.OFF,
+    ];
+    const labels = strategies.map(continuityStrategyLabel);
+    const select = (value) => {
+        const strategy = strategies.includes(value)
+            ? value
+            : strategies[labels.indexOf(value)];
+        if (!strategy) return;
+        applyVideoContinuityStrategy(node, strategy, [app.canvas, node, pos, event]);
+    };
+    const ContextMenu = globalThis.LiteGraph?.ContextMenu;
+    if (ContextMenu) {
+        new ContextMenu(labels, {
+            event,
+            node,
+            scale: Math.max(1, Number(app.canvas?.ds?.scale) || 1),
+            className: "dark",
+            callback: select,
+        });
+        return;
+    }
+    const current = node._mmxContinuityUiState?.videoStrategy;
+    const next = strategies[(Math.max(0, strategies.indexOf(current)) + 1) % strategies.length];
+    applyVideoContinuityStrategy(node, next, [app.canvas, node, pos, event]);
+}
+
+function scheduleContinuityNodeResize(node, editor) {
+    if (!node || node._mmxContinuityResizePending) return;
+    node._mmxContinuityResizePending = true;
+    queueMicrotask(() => {
+        node._mmxContinuityResizePending = false;
+        syncDirectorNodeSize(node, editor || node._minimaxEditor);
+    });
+}
+
 function installDirectorContinuityUi(node) {
     if (!node || node._mmxContinuityUiInstalled) return;
     const source = node.widgets?.find((w) => w.name === "source_overlap_frames");
@@ -447,84 +543,14 @@ function installDirectorContinuityUi(node) {
     node._mmxContinuityUiInstalled = true;
 
     source.value = normalizeSourceBridgeValue(source.value);
-    source.hidden = true;
-    source.options = source.options || {};
-    source.options.hidden = true;
-    source.computeSize = () => [0, 0];
-    if (source.element) source.element.style.display = "none";
-
+    for (const widget of [source, audio, motion, context]) {
+        setWidgetVisibility(widget, true);
+        captureContinuityRenderer(widget);
+    }
+    setWidgetVisibility(source, false);
     installContinuityCallbackGuard(node, motion);
     installContinuityCallbackGuard(node, context);
-
-    audio._mmxContinuityComposite = true;
-    audio._mmxContinuityOriginalComputeSize = audio.computeSize;
-    audio._mmxContinuityOriginalDraw = audio.draw;
-    audio._mmxContinuityOriginalMouse = audio.mouse;
-    audio._mmxContinuityOriginalCallback = audio.callback;
-    audio.computeSize = (width) => [width, 96];
-    audio.draw = function (ctx, drawNode, width, y) {
-        const state = drawNode._mmxContinuityUiState || {};
-        this._mmxAudioBounds = drawContinuityToggle(
-            ctx,
-            width,
-            y,
-            `↳ ${t("widget.audioContextEnabled")}`,
-            directorBoolValue(this.value),
-            !!state.audioContextControlEnabled,
-        );
-        ctx.save();
-        ctx.fillStyle = "#9da7bc";
-        ctx.font = "600 10px ui-sans-serif, system-ui, sans-serif";
-        ctx.textAlign = "left";
-        ctx.textBaseline = "middle";
-        ctx.fillText(t("widget.grpSourceBridge"), 18, y + 37);
-        ctx.restore();
-        this._mmxSourceBounds = drawContinuityToggle(
-            ctx,
-            width,
-            y + 45,
-            t("widget.sourceBridgeEnabled"),
-            !!state.sourceBridgeChecked,
-            !!state.sourceBridgeControlEnabled,
-        );
-        ctx.save();
-        ctx.globalAlpha = state.sourceBridgeControlEnabled ? 0.85 : 0.38;
-        ctx.fillStyle = "#9da7bc";
-        ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
-        ctx.textAlign = "left";
-        ctx.textBaseline = "middle";
-        ctx.fillText(`↳ ${t("widget.sourceBridgeFixed")}`, 22, y + 83);
-        ctx.restore();
-    };
-    audio.mouse = function (event, pos, mouseNode) {
-        const state = mouseNode._mmxContinuityUiState || {};
-        if (event.type === "pointermove" || event.type === "mousemove") {
-            if (pointInBounds(pos, this._mmxSourceBounds)) {
-                this.tooltip = t("widget.tooltip.sourceBridgeEnabled");
-            } else if (pointInBounds(pos, this._mmxAudioBounds)) {
-                this.tooltip = t("widget.tooltip.audioContextEnabled");
-            } else {
-                this.tooltip = `${t("widget.tooltip.audioContextEnabled")}\n\n${t("widget.tooltip.sourceBridgeEnabled")}`;
-            }
-            return false;
-        }
-        if (event.type !== "pointerdown" && event.type !== "mousedown") return false;
-        if (pointInBounds(pos, this._mmxAudioBounds)) {
-            if (!state.audioContextControlEnabled) return true;
-            this.value = !directorBoolValue(this.value);
-            this._mmxContinuityOriginalCallback?.call(this, this.value, mouseNode, pos, event);
-            refreshDirectorContinuityUi(mouseNode);
-            return true;
-        }
-        if (pointInBounds(pos, this._mmxSourceBounds)) {
-            if (!state.sourceBridgeControlEnabled) return true;
-            const nextValue = state.sourceBridgeChecked ? 0 : SOURCE_BRIDGE_FIXED_FRAMES;
-            notifyWidgetValueChange(mouseNode, source, nextValue, [app.canvas, mouseNode, pos, event]);
-            refreshDirectorContinuityUi(mouseNode);
-            return true;
-        }
-        return false;
-    };
+    installContinuityCallbackGuard(node, audio);
     node.setDirtyCanvas?.(true, true);
 }
 
@@ -553,24 +579,107 @@ function refreshDirectorContinuityUi(node, editor = node?._minimaxEditor) {
     });
     source.value = state.sourceBridgeValue;
     node._mmxContinuityUiState = state;
-    setContinuityWidgetEnabled(motion, state.motionContextControlEnabled);
+
+    restoreContinuityRenderer(motion);
+    restoreContinuityRenderer(audio);
+    setWidgetVisibility(source, false);
+    setWidgetVisibility(
+        motion,
+        state.showMotionContext || state.showVisualContinuitySelector,
+    );
+    setWidgetVisibility(context, state.showContextFrames);
+    setWidgetVisibility(
+        audio,
+        state.showAudioContinuation || state.showBridgeLength,
+    );
+
+    setContinuityWidgetEnabled(
+        motion,
+        state.motionContextControlEnabled || state.showVisualContinuitySelector,
+    );
     setContinuityWidgetEnabled(context, state.contextFramesControlEnabled);
-    audio._mmxContinuityDisabled = !state.audioContextControlEnabled;
-    source._mmxContinuityDisabled = !state.sourceBridgeControlEnabled;
+    setContinuityWidgetEnabled(audio, state.audioContextControlEnabled);
+    source._mmxContinuityDisabled = true;
+
     audio.options = audio.options || {};
-    const compositeTooltip = `${t("widget.tooltip.audioContextEnabled")}\n\n${t("widget.tooltip.sourceBridgeEnabled")}`;
-    audio.tooltip = compositeTooltip;
-    audio.options.tooltip = compositeTooltip;
-    source.options.tooltip = t("widget.tooltip.sourceBridgeEnabled");
-    if (context) context.label = `↳ ${t("widget.contextLength")}`;
-    if (motion) motion.label = t("widget.motionContextEnabled");
-    if (motion?.options) {
-        motion.options.tooltip = state.motionContextSuppressedByBridge
-            ? t("widget.tooltip.motionContextBridgeSuppressed")
-            : t("widget.tooltip.motionContextEnabled");
+    motion.options = motion.options || {};
+    context.options = context.options || {};
+    source.options = source.options || {};
+
+    if (state.showVisualContinuitySelector) {
+        motion.label = t("widget.visualContinuity");
+        motion.options.tooltip = t("widget.tooltip.visualContinuity");
+        motion.draw = function (ctx, drawNode, width, y) {
+            this._mmxContinuitySelectorBounds = drawContinuityValueRow(
+                ctx,
+                width,
+                y,
+                t("widget.visualContinuity"),
+                continuityStrategyLabel(drawNode._mmxContinuityUiState?.videoStrategy),
+                true,
+            );
+        };
+        motion.mouse = function (event, pos, mouseNode) {
+            if (event.type !== "pointerdown" && event.type !== "mousedown") return false;
+            if (!pointInBounds(pos, this._mmxContinuitySelectorBounds)) return false;
+            event.preventDefault?.();
+            openContinuityStrategyMenu(event, pos, mouseNode);
+            return true;
+        };
+    } else {
+        motion.label = t("widget.motionContextEnabled");
+        motion.options.tooltip = t("widget.tooltip.motionContextEnabled");
     }
+
+    context.label = t("widget.contextLength");
+    context.options.tooltip = t("widget.tooltip.contextLength");
+    source.options.tooltip = t("widget.tooltip.sourceBridgeEnabled");
+
+    if (state.showBridgeLength) {
+        audio.tooltip = t("widget.tooltip.sourceBridgeEnabled");
+        audio.options.tooltip = t("widget.tooltip.sourceBridgeEnabled");
+        audio.draw = function (ctx, drawNode, width, y) {
+            drawContinuityValueRow(
+                ctx,
+                width,
+                y,
+                t("widget.bridgeLength"),
+                t("widget.bridgeLengthFixed"),
+            );
+        };
+        audio.mouse = (event) => event.type === "pointerdown" || event.type === "mousedown";
+    } else if (state.showAudioContinuation && !state.audioContextControlEnabled) {
+        audio.tooltip = t("widget.tooltip.audioContextEnabled");
+        audio.options.tooltip = t("widget.tooltip.audioContextEnabled");
+        audio.draw = function (ctx, drawNode, width, y) {
+            drawContinuityToggle(ctx, width, y, t("widget.audioContextEnabled"), false, false);
+        };
+        audio.mouse = () => true;
+    } else {
+        audio.label = t("widget.audioContextEnabled");
+        audio.tooltip = t("widget.tooltip.audioContextEnabled");
+        audio.options.tooltip = t("widget.tooltip.audioContextEnabled");
+    }
+
     const group = node.widgets?.find((w) => w.name === "bd_grp_motion");
-    if (group) group._mmxContinuityStatusText = formatContinuityStatus(state);
+    if (group) {
+        group._mmxContinuitySingleMessage = state.showSingleSegmentMessage
+            ? t("widget.continuityMultiOnly")
+            : "";
+    }
+    const layoutSignature = [
+        state.mode,
+        state.videoStrategy,
+        state.showMotionContext,
+        state.showContextFrames,
+        state.showAudioContinuation,
+        state.showVisualContinuitySelector,
+        state.showBridgeLength,
+    ].join("|");
+    if (node._mmxContinuityLayoutSignature !== layoutSignature) {
+        node._mmxContinuityLayoutSignature = layoutSignature;
+        scheduleContinuityNodeResize(node, editor);
+    }
     node.setDirtyCanvas?.(true, true);
     return state;
 }
@@ -646,23 +755,24 @@ function makeGroupHeaderWidget(inputName, inputData) {
         draw(ctx, node, widget_width, y, H) {
             const text = this._mmxSamplingStatusText
                 || (this._mmxGroupI18nKey ? t(this._mmxGroupI18nKey) : (this._bdGroupLabel || label));
-            const continuity = inputName === "bd_grp_motion" ? this._mmxContinuityStatusText : "";
-            drawGroupHeader(ctx, node, widget_width, y, continuity ? 26 : H, text);
-            if (continuity) {
+            const singleMessage = inputName === "bd_grp_motion"
+                ? this._mmxContinuitySingleMessage
+                : "";
+            drawGroupHeader(ctx, node, widget_width, y, singleMessage ? 26 : H, text);
+            if (singleMessage) {
                 ctx.save();
                 ctx.fillStyle = "#9da7bc";
                 ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
                 ctx.textAlign = "left";
                 ctx.textBaseline = "middle";
-                ctx.fillText(continuity, 20, y + 38);
-                ctx.fillStyle = "#9da7bc";
-                ctx.font = "600 10px ui-sans-serif, system-ui, sans-serif";
-                ctx.fillText(t("widget.grpMotionContext"), 18, y + 58);
+                ctx.fillText(singleMessage, 20, y + 39);
                 ctx.restore();
             }
         },
         computeSize(width) {
-            return [width, inputName === "bd_grp_motion" ? 70 : 26];
+            const singleMessage = inputName === "bd_grp_motion"
+                && this._mmxContinuitySingleMessage;
+            return [width, singleMessage ? 48 : 26];
         },
         mouse() {
             return false;

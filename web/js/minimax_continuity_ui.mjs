@@ -3,8 +3,14 @@
 
 export const SOURCE_BRIDGE_FIXED_FRAMES = 5;
 
+export const VIDEO_CONTINUITY_STRATEGIES = Object.freeze({
+    SOURCE_BRIDGE: "source_bridge",
+    MOTION_CONTEXT: "motion_context",
+    OFF: "off",
+});
+
 const BRIDGE_TASKS = new Set(["v2v", "rv2v"]);
-const MOTION_CONTEXT_TASKS = new Set(["t2v", "i2v", "r2v", "fl2v", "v2v", "rv2v"]);
+const MOTION_CONTEXT_TASKS = new Set(["t2v", "i2v", "r2v", "fl2v"]);
 
 function boolValue(value) {
     if (value === false || value === 0 || value == null) return false;
@@ -14,6 +20,43 @@ function boolValue(value) {
 
 export function normalizeSourceBridgeValue(value) {
     return boolValue(value) ? SOURCE_BRIDGE_FIXED_FRAMES : 0;
+}
+
+export function videoStrategyBackendPatch(strategy) {
+    if (strategy === VIDEO_CONTINUITY_STRATEGIES.SOURCE_BRIDGE) {
+        return { sourceOverlapFrames: SOURCE_BRIDGE_FIXED_FRAMES };
+    }
+    if (strategy === VIDEO_CONTINUITY_STRATEGIES.MOTION_CONTEXT) {
+        return { sourceOverlapFrames: 0, motionContextEnabled: true };
+    }
+    if (strategy === VIDEO_CONTINUITY_STRATEGIES.OFF) {
+        return { sourceOverlapFrames: 0, motionContextEnabled: false };
+    }
+    throw new RangeError(`Unknown V2V/RV2V continuity strategy: ${strategy}`);
+}
+
+export function setWidgetVisibility(widget, visible) {
+    if (!widget) return;
+    if (!widget._mmxContinuityVisibilitySnapshot) {
+        widget._mmxContinuityVisibilitySnapshot = {
+            computeSize: widget.computeSize,
+            hidden: widget.hidden,
+            optionHidden: widget.options?.hidden,
+            elementDisplay: widget.element?.style?.display,
+        };
+    }
+    const snapshot = widget._mmxContinuityVisibilitySnapshot;
+    widget.options = widget.options || {};
+    widget.hidden = !visible;
+    widget.options.hidden = !visible;
+    if (visible) {
+        if (snapshot.computeSize === undefined) delete widget.computeSize;
+        else widget.computeSize = snapshot.computeSize;
+        if (widget.element?.style) widget.element.style.display = snapshot.elementDisplay ?? "";
+    } else {
+        widget.computeSize = () => [0, 0];
+        if (widget.element?.style) widget.element.style.display = "none";
+    }
 }
 
 export function syncDisabledWidgetState(widget, enabled) {
@@ -39,13 +82,34 @@ export function notifyWidgetValueChange(node, widget, nextValue, callbackArgs = 
     return true;
 }
 
+export function applyVideoStrategyToWidgets({
+    node,
+    sourceWidget,
+    motionWidget,
+    strategy,
+    callbackArgs = [],
+} = {}) {
+    if (!sourceWidget || !motionWidget) {
+        throw new TypeError("V2V/RV2V continuity strategy requires source and motion widgets.");
+    }
+    const patch = videoStrategyBackendPatch(strategy);
+    const changed = [];
+    if (patch.sourceOverlapFrames !== undefined
+        && notifyWidgetValueChange(node, sourceWidget, patch.sourceOverlapFrames, callbackArgs)) {
+        changed.push(sourceWidget.name);
+    }
+    if (patch.motionContextEnabled !== undefined
+        && notifyWidgetValueChange(node, motionWidget, patch.motionContextEnabled, callbackArgs)) {
+        changed.push(motionWidget.name);
+    }
+    return changed;
+}
+
 export function resolveContinuityUiState({
     taskKey,
     segmentCount,
     motionContextEnabled,
-    contextFrames,
     sourceBridgeValue,
-    audioContextEnabled,
     audioMode,
 } = {}) {
     const task = String(taskKey || "").trim().toLowerCase();
@@ -56,44 +120,43 @@ export function resolveContinuityUiState({
     const normalizedBridge = normalizeSourceBridgeValue(sourceBridgeValue);
     const bridgeOn = normalizedBridge > 0;
     const motionOn = boolValue(motionContextEnabled);
-    const audioOn = boolValue(audioContextEnabled);
-    const bridgeActive = multiSegment && bridgeTask && bridgeOn;
-    const motionControlEnabled = multiSegment && motionTask && !bridgeActive;
-    const motionActive = motionControlEnabled && motionOn;
-    const context = Math.max(1, Math.trunc(Number(contextFrames) || 1));
+    const videoStrategy = bridgeTask
+        ? (bridgeOn
+            ? VIDEO_CONTINUITY_STRATEGIES.SOURCE_BRIDGE
+            : motionOn
+                ? VIDEO_CONTINUITY_STRATEGIES.MOTION_CONTEXT
+                : VIDEO_CONTINUITY_STRATEGIES.OFF)
+        : null;
 
-    let strategy = "none";
-    let status = { key: "none", task: task.toUpperCase(), segments };
-    if (!multiSegment) {
-        strategy = "single";
-        status = { key: "single", task: task.toUpperCase(), segments };
-    } else if (bridgeActive) {
-        strategy = "source_bridge";
-        status = {
-            key: "bridge",
-            task: task.toUpperCase(),
-            segments,
-            frames: SOURCE_BRIDGE_FIXED_FRAMES,
-        };
-    } else if (motionActive) {
-        strategy = "motion_context";
-        status = { key: "motion", task: task.toUpperCase(), segments, frames: context };
-    }
+    let mode = "unsupported";
+    if (!multiSegment) mode = "single";
+    else if (motionTask) mode = "motion_context_task";
+    else if (bridgeTask) mode = "video_strategy";
+
+    const generatedMotionUi = mode === "motion_context_task";
+    const videoMotionUi = mode === "video_strategy"
+        && videoStrategy === VIDEO_CONTINUITY_STRATEGIES.MOTION_CONTEXT;
+    const motionActive = (generatedMotionUi && motionOn) || videoMotionUi;
+    const showContextFrames = generatedMotionUi || videoMotionUi;
+    const showAudioContinuation = generatedMotionUi || videoMotionUi;
 
     return {
         taskKey: task,
         segmentCount: segments,
         multiSegment,
-        strategy,
-        status,
-        motionContextValue: motionOn,
-        audioContextValue: audioOn,
+        mode,
+        videoStrategy,
         sourceBridgeValue: normalizedBridge,
-        sourceBridgeChecked: bridgeOn,
-        sourceBridgeControlEnabled: multiSegment && bridgeTask,
-        motionContextSuppressedByBridge: bridgeActive,
-        motionContextControlEnabled: motionControlEnabled,
+        showSingleSegmentMessage: mode === "single",
+        showMotionContext: generatedMotionUi,
+        showContextFrames,
+        showAudioContinuation,
+        showVisualContinuitySelector: mode === "video_strategy",
+        showBridgeLength: mode === "video_strategy"
+            && videoStrategy === VIDEO_CONTINUITY_STRATEGIES.SOURCE_BRIDGE,
+        motionContextControlEnabled: generatedMotionUi,
         contextFramesControlEnabled: motionActive,
-        audioContextControlEnabled: motionActive && String(audioMode || "generate").toLowerCase() === "generate",
+        audioContextControlEnabled: motionActive
+            && String(audioMode || "generate").toLowerCase() === "generate",
     };
 }
