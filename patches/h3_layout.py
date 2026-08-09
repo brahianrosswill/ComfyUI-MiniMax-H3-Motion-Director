@@ -55,63 +55,75 @@ _applied = False
 _failure_reason = None
 
 
-def _ref_cursor_span(blk):
-    """Return the exact amount one stock H3 ref advances the cursor."""
+REF_SEGMENT_KINDS = ("ref_img", "ref_audio")
+
+
+def _target_origin(layout):
+    """Read the target clip's real start coordinate from PackedLayout."""
+    if not layout.segments:
+        raise RuntimeError(
+            "h3_motion_context: PackedLayout has no segments. Upstream layout "
+            "change; refusing to rewrite positions."
+        )
+    a, b, kind = layout.segments[-1]
+    if kind != "video" or b <= a:
+        raise RuntimeError(
+            "h3_motion_context: expected the target video rows to be the last "
+            "layout segment, found %r spanning %d rows. Upstream layout "
+            "change; refusing to rewrite positions." % (kind, b - a)
+        )
+    return float(layout.position_ids[a, 0])
+
+
+def _expected_ref_segments(blk):
+    """Return the actual segment kinds one stock H3 reference should emit."""
     kind = blk.get("kind")
     if kind == "image":
-        return 1.0
+        return ("ref_img",)
     if kind == "audio":
-        return float(blk.get("ref_audio_t", 0))
-    if kind in ("video", "video_audio"):
-        rt = float(blk.get("ref_audio_t", 0))
-        vt = int(blk.get("latent_t", 0))
-        return max(rt, sum(mm._video_t_spans(vt)))
+        return ("ref_audio",)
+    if kind == "video":
+        return ("ref_img",)
+    if kind == "video_audio":
+        return ("ref_audio", "ref_img")
     raise RuntimeError(
-        "h3_motion_context: unknown ref kind %r; refusing cursor arithmetic."
-        % kind
+        "h3_motion_context: unknown reference kind %r; cannot tell which "
+        "layout rows belong to it." % (kind,)
     )
 
 
-def _ref_cursor_advance(refs):
-    """How far ref blocks push the target origin past text_len.
-
-    Refs are laid out sequentially from a cursor that starts at text_len,
-    and the target audio and video rows use the cursor's final value as
-    their origin. Keyframe coordinates are computed from text_len directly,
-    so without this term adding any ref would slide the anchors backwards
-    relative to the clip they are anchoring.
-    """
-    if not refs:
-        return 0.0
-    cursor = 0.0
-    for blk in refs:
-        cursor += _ref_cursor_span(blk)
-    return cursor
-
-
-def _marked_audio_cursor(refs):
-    """Return (block, start, final cursor) for the one marked audio ref."""
-    cursor = 0.0
-    marked = []
-    for index, blk in enumerate(refs or []):
-        start = cursor
-        cursor += _ref_cursor_span(blk)
-        if blk.get(MC_AUDIO_KEY) is not None:
-            marked.append((index, blk, start))
-    if len(marked) != 1:
+def _ref_segment_map(layout, refs):
+    """Map each reference list index to the exact rows PackedLayout emitted."""
+    ref_segments = [
+        (a, b, kind)
+        for a, b, kind in layout.segments
+        if kind in REF_SEGMENT_KINDS
+    ]
+    expected = [
+        (index, kind)
+        for index, block in enumerate(refs or [])
+        for kind in _expected_ref_segments(block)
+    ]
+    if len(expected) != len(ref_segments):
         raise RuntimeError(
-            "h3_motion_context: expected exactly one marked Motion Audio "
-            "Context ref, found %d among %d refs."
-            % (len(marked), len(refs or []))
+            "h3_motion_context: %d reference blocks should produce %d "
+            "reference layout segments, but PackedLayout contains %d. "
+            "ComfyUI MiniMax H3 layout behavior changed; refusing to move "
+            "rows."
+            % (len(refs or []), len(expected), len(ref_segments))
         )
-    _, blk, start = marked[0]
-    if blk.get("kind") != "audio":
-        raise RuntimeError(
-            "h3_motion_context: %s is set on a %r ref; only a standalone "
-            "audio ref may be moved onto the target timeline."
-            % (MC_AUDIO_KEY, blk.get("kind"))
-        )
-    return blk, start, cursor
+    mapped = {}
+    for (index, wanted), (a, b, actual) in zip(expected, ref_segments):
+        if actual != wanted:
+            raise RuntimeError(
+                "h3_motion_context: reference block %d (%r) should emit a "
+                "%s segment, but PackedLayout contains %s at that position. "
+                "ComfyUI MiniMax H3 layout behavior changed; refusing to "
+                "move rows."
+                % (index, refs[index].get("kind"), wanted, actual)
+            )
+        mapped.setdefault(index, {})[wanted] = (a, b)
+    return mapped
 
 
 def _cond_t(text_len, latent_t, frame_count, p):
@@ -132,8 +144,8 @@ def _cond_t(text_len, latent_t, frame_count, p):
 
 
 def _fixup(layout, text_len, latent_t, frame_count, keyframes, refs=None):
-    """Rewrite cond-row time coordinates to the general position formula."""
-    offset = _ref_cursor_advance(refs)
+    """Rewrite cond rows relative to the target origin PackedLayout built."""
+    offset = _target_origin(layout) - float(text_len)
     if offset and any(kf.get(MC_KEY) is None for kf in keyframes):
         # keyframes without MC_KEY are left exactly as stock built them,
         # which means they do NOT get the ref cursor compensation. Mixing
@@ -158,7 +170,7 @@ def _fixup(layout, text_len, latent_t, frame_count, keyframes, refs=None):
 
 
 def _fixup_audio(layout, text_len, refs):
-    """Move the audio ref rows' time coordinates onto the target timeline.
+    """Move exactly the marked audio ref segment onto the target timeline.
 
     Refs and keyframes carry identical row machinery; what makes the model
     read a ref as "a separate clip to imitate" rather than "this clip,
@@ -181,38 +193,60 @@ def _fixup_audio(layout, text_len, refs):
     empty coordinate space rather than onto the text rows -- the collision
     that made `before` mode fail for video does not arise here.
 
-    Row selection is by coordinate range (the vacated slot), excluding
-    cond segments explicitly so a stock first-frame keyframe sitting at
-    text_len can never be swept up regardless of fixup order.
+    Row selection comes from PackedLayout's actual segment table.  This is
+    exact even when Picture, Video, paired Video Audio, normal Audio, and
+    Motion Audio references coexist or are reordered.
     """
-    blk, marked_start, final_cursor = _marked_audio_cursor(refs)
+    marked = [
+        index
+        for index, block in enumerate(refs or [])
+        if block.get(MC_AUDIO_KEY) is not None
+    ]
+    if len(marked) != 1:
+        raise RuntimeError(
+            "h3_motion_context: expected exactly one marked Motion Audio "
+            "Context ref, found %d among %d refs."
+            % (len(marked), len(refs or []))
+        )
+    index = marked[0]
+    blk = refs[index]
+    if blk.get("kind") != "audio":
+        raise RuntimeError(
+            "h3_motion_context: %s is set on a %r ref; only a standalone "
+            "audio ref may be moved onto the target timeline."
+            % (MC_AUDIO_KEY, blk.get("kind"))
+        )
     rt = int(blk.get("ref_audio_t", 0))
     if rt <= 0:
         raise RuntimeError(
             "h3_motion_context: marked Motion Audio Context has no latent steps."
         )
-    end_frame = float(blk[MC_AUDIO_KEY])
-    old_start = float(text_len) + marked_start
-    old_end = old_start + float(rt)
-    target_origin = float(text_len) + final_cursor
 
-    t = layout.position_ids[:, 0]
-    sel = (t >= old_start - 1e-4) & (t < old_end - 1e-4)
-    for a, b, kind in layout.segments:
-        if kind == "cond":
-            sel[a:b] = False
-    count = int(sel.sum())
-    expected_rows = rt * 2
-    if count != expected_rows:
+    segment = _ref_segment_map(layout, refs).get(index, {}).get("ref_audio")
+    if segment is None:
         raise RuntimeError(
-            "h3_motion_context: found %d rows in the audio ref's coordinate "
-            "slot for %d latent steps, expected exactly %d. Upstream layout "
-            "change or overlapping ref coordinates; refusing to move rows."
-            % (count, rt, expected_rows)
+            "h3_motion_context: the marked Motion Audio Context produced no "
+            "ref_audio segment. ComfyUI MiniMax H3 layout behavior changed; "
+            "refusing to move rows."
         )
+    a, b = segment
+    expected_rows = rt * 2
+    if b - a != expected_rows:
+        raise RuntimeError(
+            "h3_motion_context: the marked Motion Audio Context has %d rows "
+            "for %d latent steps, expected exactly %d. ComfyUI MiniMax H3 "
+            "layout behavior changed; refusing to move rows."
+            % (b - a, rt, expected_rows)
+        )
+
+    end_frame = float(blk[MC_AUDIO_KEY])
+    target_origin = _target_origin(layout)
+    old_start = float(layout.position_ids[a, 0])
     # window end at target time FRAME_RESCALE * end_frame, width rt steps
-    shift = (target_origin + mm.FRAME_RESCALE * end_frame - rt) - old_start
-    layout.position_ids[sel, 0] = t[sel] + shift
+    desired_start = target_origin + mm.FRAME_RESCALE * end_frame - float(rt)
+    layout.position_ids[a:b, 0] = (
+        layout.position_ids[a:b, 0] + (desired_start - old_start)
+    )
 
 
 def _patched_init(self, text_len, latent_t, latent_h, latent_w, audio_t,
@@ -278,16 +312,9 @@ def _self_test():
         raise RuntimeError("run %s escapes the [%.4f, %.4f] span"
                            % (ts, float(text_len), t_last))
 
-    # adding a ref must not move the anchors relative to the target. Stock
-    # cond rows cannot be the reference here: stock computes them from
-    # text_len and never compensates for refs, which is the very bug
-    # _ref_cursor_advance exists to fix. The ground truth is the target
-    # rows themselves. Ref rows are laid out BEFORE the target, so the
-    # largest time coordinate in position_ids belongs to the end of the
-    # target in both layouts, and the anchor-to-end gap must be identical
-    # with and without the ref. This exercises _ref_cursor_advance against
-    # stock's real cursor arithmetic, so if upstream changes how refs
-    # advance the cursor, this fails and the patch is not applied.
+    # Adding a ref must keep every anchor at the same offset from the real
+    # target origin.  The origin is read directly from the final video
+    # segment rather than reconstructed from reference metadata.
     ref = [{"kind": "audio", "ref_audio_t": 8}]
     d = mm.PackedLayout.__new__(mm.PackedLayout)
     _orig_init(d, text_len, latent_t, lh, lw, audio_t,
@@ -296,26 +323,20 @@ def _self_test():
     ts_ref = [float(d.position_ids[s, 0]) for s, _, k in d.segments if k == "cond"]
     if len(ts_ref) != len(ts):
         raise RuntimeError("cond segment count changed when a ref was added")
-    # a semantic failure here is a shift of whole rows (the 8.0 of the ref,
-    # or FRAME_RESCALE multiples), while legitimate noise is float
-    # accumulation from a different origin, orders of magnitude below 1e-3
-    # even at float32. Strict equality stays reserved for the endpoint test.
     tol = 1e-3
-    gap = float(c.position_ids[:, 0].max()) - ts[0]
-    gap_ref = float(d.position_ids[:, 0].max()) - ts_ref[0]
-    if abs(gap - gap_ref) > tol:
+    origin = _target_origin(d)
+    expected_ts = [origin + mm.FRAME_RESCALE * i for i in range(len(run))]
+    if any(abs(got - expected) > tol
+           for got, expected in zip(ts_ref, expected_ts)):
         raise RuntimeError(
-            "ref compensation off by %.6f: anchor-to-target gap %.6f without "
-            "ref, %.6f with. _ref_cursor_advance no longer matches the "
-            "layout's cursor arithmetic." % (gap_ref - gap, gap, gap_ref))
-    shifts = [b - a for a, b in zip(ts, ts_ref)]
-    if any(abs(s - shifts[0]) > tol for s in shifts):
-        raise RuntimeError("ref shifted anchors unevenly: %s" % shifts)
+            "ref-compensated anchors %s do not follow target origin %.6f"
+            % (ts_ref, origin)
+        )
 
     # Multi-ref audio placement: Picture, Video, Motion Audio, user Audio.
-    # Only the marked block may move, and target origin must include the user
-    # audio that follows it. This proves both actual-cursor discovery and the
-    # final-cursor calculation rather than relying on refs == 1.
+    # Only the exact segment emitted by the marked block may move. The marker
+    # deliberately sits before another audio block, proving lookup does not
+    # depend on the Motion Audio ref being first or last.
     end_frame = 4
     rt = 8
     refs_plain = [
@@ -341,14 +362,9 @@ def _self_test():
     if not torch.equal(d_audio.position_ids[:, 1:], e.position_ids[:, 1:]):
         raise RuntimeError("audio move touched a non-time coordinate column")
     td, te = d_audio.position_ids[:, 0], e.position_ids[:, 0]
-    cond_rows = set()
-    for a, b, kind in d_audio.segments:
-        if kind == "cond":
-            cond_rows.update(range(a, b))
-    marked_start = float(text_len) + sum(_ref_cursor_span(r) for r in refs_plain[:2])
-    expect_moved = set(i for i in range(len(td))
-                       if marked_start - 1e-4 <= float(td[i]) < marked_start + rt - 1e-4
-                       and i not in cond_rows)
+    segment_map = _ref_segment_map(d_audio, refs_plain)
+    a, b = segment_map[2]["ref_audio"]
+    expect_moved = set(range(a, b))
     moved = set(i for i in range(len(td)) if float(td[i]) != float(te[i]))
     if moved != expect_moved:
         raise RuntimeError(
@@ -357,12 +373,17 @@ def _self_test():
                          sorted(moved ^ expect_moved)[:8]))
     if not moved:
         raise RuntimeError("audio move moved no rows")
-    trailing = _ref_cursor_span(refs_plain[3])
-    want_shift = trailing + mm.FRAME_RESCALE * end_frame
     deltas = [float(te[i]) - float(td[i]) for i in sorted(moved)]
-    if any(abs(dd - want_shift) > 1e-5 for dd in deltas):
-        raise RuntimeError("audio rows shifted non-uniformly or by the wrong "
-                           "amount: %s vs %.6f" % (deltas[:4], want_shift))
+    if any(abs(dd - deltas[0]) > 1e-5 for dd in deltas):
+        raise RuntimeError("audio rows did not move by one uniform shift: %s"
+                           % (deltas[:4],))
+    desired_start = (_target_origin(e) + mm.FRAME_RESCALE * end_frame
+                     - float(rt))
+    if abs(float(te[a]) - desired_start) > 1e-5:
+        raise RuntimeError(
+            "audio segment starts at %.6f, expected %.6f from target origin"
+            % (float(te[a]), desired_start)
+        )
 
 
 def apply_patch():
