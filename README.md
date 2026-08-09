@@ -11,11 +11,6 @@ Director. Its purpose is to help MiniMax H3 carry motion and generated audio
 from one segment into the next, so longer multi-segment videos feel connected
 instead of restarting at every cut.
 
-<img width="629" height="818" alt="螢幕擷取畫面 2026-08-09 090151" src="https://github.com/user-attachments/assets/dbd04567-de62-4aa3-8b7f-bedb0cb8357b" />
-<img width="1808" height="958" alt="螢幕擷取畫面 2026-08-09 090211" src="https://github.com/user-attachments/assets/5fd86776-da77-43bf-9864-6e2ce7f74ed2" />
-<img width="540" height="107" alt="螢幕擷取畫面 2026-08-09 090221" src="https://github.com/user-attachments/assets/6931c473-6920-4b29-a698-0ea65f4db266" />
-
-
 This is an independent, substantially modified derivative and is not an
 official distribution of either upstream project.
 
@@ -29,7 +24,7 @@ official distribution of either upstream project.
 - H3-native five-frame Source Bridge for V2V/RV2V segment boundaries
 - Native H3 reference + keyframe-anchor coexistence
 - Original V2V/RV2V frames are conditioning only; final Bridge pixels are regenerated
-- Generated-audio continuation between segments
+- Motion Context generated-audio continuation between segments
 - 22-frame Motion Context baseline for generated-continuation tasks
 - Full-sequence generation or selected-segment runs
 - Exact requested visible video length with matching audio length
@@ -160,24 +155,44 @@ Source Bridge needs both adjacent nominal generated-segment caches.
 
 | Task | Recommended continuity | Starting setting | Reason |
 |---|---|---|---|
-| T2V | Motion Context | 22 | The next segment has no complete source-video motion, so it needs the previous generated state. |
-| I2V | Motion Context | 22 | Continue generated state after the first image; an explicit new image resets it. |
-| FL2V | Motion Context / explicit anchors | 22 as chaining baseline | Use when generated motion should continue across anchored segments. |
-| R2V | Motion Context | 22 | References control identity/material while MC supplies cross-segment temporal state. |
-| V2V | Source Bridge | 5, visual MC OFF | The current `<Video 1>` should have the highest motion authority. |
-| RV2V | Source Bridge | 5, visual MC OFF | `<Video 1>` controls motion while Picture refs control subject/appearance. |
+| T2V | Motion Context | 22 frames baseline | The next segment has no complete source-video motion, so it needs the previous generated state. |
+| I2V | Motion Context | 22 frames baseline | Continue generated state after the first image; an explicit new image resets it. |
+| FL2V | Motion Context / explicit anchors | 22-frame chaining baseline | Use when generated motion should continue across anchored segments. |
+| R2V | Motion Context | 22 frames baseline | References control identity/material while MC supplies cross-segment temporal state. |
+| V2V | Source Bridge | Bridge ON (fixed 5-frame H3 bridge) | The current `<Video 1>` should have the highest motion authority. Visual Motion Context is automatically disabled while Bridge is on. |
+| RV2V | Source Bridge | Bridge ON (fixed 5-frame H3 bridge) | `<Video 1>` controls motion while Picture refs control subject/appearance. Visual Motion Context is automatically disabled while Bridge is on. |
 
 Use Motion Context when the next segment should continue the **previously
 generated result**. Use Source Bridge when V2V/RV2V should remain driven by the
 **current original source video**. `22` is a generated-continuation baseline;
 it is not a global recommendation for V2V/RV2V.
 
+The outer node groups these settings under **Cross-Segment Continuity** and
+shows a read-only `Active` line. That line updates immediately when the task,
+segment count, language or continuity toggles change. The controls follow
+these task-aware UI rules:
+
+- With one segment, Motion Context, Context Frames, Continue Generated Audio
+  and Source Bridge are disabled because there is no cross-segment boundary.
+  Their stored values are preserved for later multi-segment use.
+- With multiple T2V/I2V/FL2V/R2V segments, Motion Context is available and
+  Source Bridge is disabled because those tasks do not use an original-video
+  boundary Bridge.
+- With multiple V2V/RV2V segments and Source Bridge ON, the fixed five-frame
+  Bridge controls visual continuity. Motion Context and its dependent controls
+  are shown disabled without clearing the saved Motion Context toggle.
+- With Source Bridge OFF, V2V/RV2V may use Motion Context as an experimental
+  fallback.
+- Context Frames and Continue Generated Audio are enabled only while Motion
+  Context is active. Continue Generated Audio is additionally available only
+  when the output audio mode is **Generate audio**.
+
 ## Motion Context
 
 Generated-continuation baseline for T2V/I2V/FL2V/R2V:
 
 ```text
-Enable Motion Context       true
+Motion Context              true
 Context Frames              22
 Continue Generated Audio    true
 ```
@@ -202,12 +217,14 @@ mode changes only output packaging and does not affect these inheritance rules.
 Recommended starting point:
 
 ```text
-Enable Motion Context       false
-Source Bridge Frames        5
+Source Bridge               ON
+H3 Bridge                   fixed 5 frames
 ```
 
 The backend field remains `source_overlap_frames` so existing workflows keep
-loading, but Source Bridge v1 accepts only `0` (disabled) or `5` (enabled).
+loading. The UI presents it as an OFF/ON toggle while the serialized backend
+value remains the original integer: `0` for OFF and `5` for ON. Any legacy
+non-zero value loads as ON and is normalized to `5` on the next save.
 
 For a boundary at source frame `B`, the Director keeps both normal segment
 generations at their nominal lengths. It then performs one extra five-frame H3
@@ -224,8 +241,9 @@ The five original frames enter `<Video 1>` only as conditioning. Original
 source pixels are never copied into final output. The normal left/right audio
 cut remains unchanged in Source Bridge v1; there is no Bridge audio or
 crossfade. Total video frame count, FPS and timeline duration remain unchanged.
-Source Bridge v1 improves visual continuity only. Generated-audio continuity
-remains a separate concern.
+Source Bridge v1 improves visual continuity only. **Continue Generated Audio
+belongs to the Motion Context path. Source Bridge does not currently carry
+Motion Context generated-audio continuation.**
 
 If the five source frames cross a physical file boundary, an edited timeline
 jump, BOF/EOF, or an RV2V Picture/Audio reference-set change, that boundary is
@@ -235,8 +253,9 @@ adjacent generated cache is missing; generate the complete sequence once or
 generate the missing adjacent segment first.
 
 Even if the Motion Context toggle remains enabled, V2V/RV2V with Source Bridge
-5 skips visual Motion Context. Audio Context behavior is not changed by Source
-Bridge v1.
+ON skips visual Motion Context. The UI disables the Motion Context controls in
+that state but preserves their saved values. Turning Source Bridge OFF restores
+the existing experimental Motion Context fallback.
 
 ## Important Notes
 

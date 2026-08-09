@@ -89,6 +89,14 @@ import {
 } from "./minimax_fl2v.js";
 import { mountPromptImageMentions } from "./minimax_prompt_mentions.js";
 import {
+    SOURCE_BRIDGE_FIXED_FRAMES,
+    normalizeSourceBridgeValue,
+    notifyWidgetValueChange,
+    resolveContinuityUiState,
+    restoreDisabledWidgetValue,
+    syncDisabledWidgetState,
+} from "./minimax_continuity_ui.mjs";
+import {
     applyI18nDom,
     aspectDisplayLabel,
     getLocale,
@@ -286,7 +294,7 @@ const DIRECTOR_WIDGET_LABEL_KEYS = {
     seed: "widget.seed",
     motion_context_enabled: "widget.motionContextEnabled",
     context_length: "widget.contextLength",
-    source_overlap_frames: "widget.sourceOverlapFrames",
+    source_overlap_frames: "widget.sourceBridgeEnabled",
     audio_context_enabled: "widget.audioContextEnabled",
     steps: "widget.steps",
     sampler_name: "widget.samplerName",
@@ -346,6 +354,225 @@ function applyDirectorWidgetLabels(node) {
         }
     }
     refreshSamplingModeUi(node);
+    refreshDirectorContinuityUi(node);
+}
+
+function directorBoolValue(value) {
+    if (value === false || value === 0 || value == null) return false;
+    const text = String(value).trim().toLowerCase();
+    return text !== "" && text !== "0" && text !== "false" && text !== "off";
+}
+
+function formatContinuityStatus(state) {
+    const vars = state.status || {};
+    const detailKey = {
+        single: "widget.continuityStatus.single",
+        motion: "widget.continuityStatus.motion",
+        bridge: "widget.continuityStatus.bridge",
+        none: "widget.continuityStatus.none",
+    }[vars.key] || "widget.continuityStatus.none";
+    const separator = getLocale() === "en" ? ": " : "：";
+    return `${t("widget.continuityActive")}${separator}${t(detailKey, vars)}`;
+}
+
+function drawContinuityToggle(ctx, width, y, label, checked, enabled) {
+    const margin = 10;
+    const rowH = 24;
+    const alpha = enabled ? 1 : 0.38;
+    ctx.save();
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = "#252525";
+    ctx.strokeStyle = "#555";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(margin, y + 1, width - margin * 2, rowH - 2, 5);
+    else ctx.rect(margin, y + 1, width - margin * 2, rowH - 2);
+    ctx.fill();
+    ctx.stroke();
+    const boxX = width - margin - 34;
+    const boxY = y + 5;
+    ctx.fillStyle = checked ? "#4f9f72" : "#3a3a3a";
+    ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(boxX, boxY, 28, 14, 7);
+    else ctx.rect(boxX, boxY, 28, 14);
+    ctx.fill();
+    ctx.fillStyle = "#eee";
+    ctx.beginPath();
+    ctx.arc(checked ? boxX + 20 : boxX + 8, boxY + 7, 5, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#d8dce8";
+    ctx.font = "11px ui-sans-serif, system-ui, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    ctx.fillText(label, margin + 12, y + rowH / 2);
+    ctx.restore();
+    return [margin, y + 1, width - margin * 2, rowH - 2];
+}
+
+function pointInBounds(pos, bounds) {
+    return !!bounds
+        && pos[0] >= bounds[0]
+        && pos[0] <= bounds[0] + bounds[2]
+        && pos[1] >= bounds[1]
+        && pos[1] <= bounds[1] + bounds[3];
+}
+
+function installContinuityCallbackGuard(node, widget) {
+    if (!widget || widget._mmxContinuityCallbackGuarded) return;
+    widget._mmxContinuityCallbackGuarded = true;
+    const original = widget.callback;
+    widget.callback = function (...args) {
+        if (this._mmxContinuityDisabled) {
+            restoreDisabledWidgetValue(this);
+            node.setDirtyCanvas?.(true, true);
+            return undefined;
+        }
+        const result = original?.apply(this, args);
+        refreshDirectorContinuityUi(node);
+        return result;
+    };
+}
+
+function setContinuityWidgetEnabled(widget, enabled) {
+    syncDisabledWidgetState(widget, enabled);
+}
+
+function installDirectorContinuityUi(node) {
+    if (!node || node._mmxContinuityUiInstalled) return;
+    const source = node.widgets?.find((w) => w.name === "source_overlap_frames");
+    const audio = node.widgets?.find((w) => w.name === "audio_context_enabled");
+    const motion = node.widgets?.find((w) => w.name === "motion_context_enabled");
+    const context = node.widgets?.find((w) => w.name === "context_length");
+    if (!source || !audio || !motion || !context) return;
+    node._mmxContinuityUiInstalled = true;
+
+    source.value = normalizeSourceBridgeValue(source.value);
+    source.hidden = true;
+    source.options = source.options || {};
+    source.options.hidden = true;
+    source.computeSize = () => [0, 0];
+    if (source.element) source.element.style.display = "none";
+
+    installContinuityCallbackGuard(node, motion);
+    installContinuityCallbackGuard(node, context);
+
+    audio._mmxContinuityComposite = true;
+    audio._mmxContinuityOriginalComputeSize = audio.computeSize;
+    audio._mmxContinuityOriginalDraw = audio.draw;
+    audio._mmxContinuityOriginalMouse = audio.mouse;
+    audio._mmxContinuityOriginalCallback = audio.callback;
+    audio.computeSize = (width) => [width, 96];
+    audio.draw = function (ctx, drawNode, width, y) {
+        const state = drawNode._mmxContinuityUiState || {};
+        this._mmxAudioBounds = drawContinuityToggle(
+            ctx,
+            width,
+            y,
+            `↳ ${t("widget.audioContextEnabled")}`,
+            directorBoolValue(this.value),
+            !!state.audioContextControlEnabled,
+        );
+        ctx.save();
+        ctx.fillStyle = "#9da7bc";
+        ctx.font = "600 10px ui-sans-serif, system-ui, sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(t("widget.grpSourceBridge"), 18, y + 37);
+        ctx.restore();
+        this._mmxSourceBounds = drawContinuityToggle(
+            ctx,
+            width,
+            y + 45,
+            t("widget.sourceBridgeEnabled"),
+            !!state.sourceBridgeChecked,
+            !!state.sourceBridgeControlEnabled,
+        );
+        ctx.save();
+        ctx.globalAlpha = state.sourceBridgeControlEnabled ? 0.85 : 0.38;
+        ctx.fillStyle = "#9da7bc";
+        ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "middle";
+        ctx.fillText(`↳ ${t("widget.sourceBridgeFixed")}`, 22, y + 83);
+        ctx.restore();
+    };
+    audio.mouse = function (event, pos, mouseNode) {
+        const state = mouseNode._mmxContinuityUiState || {};
+        if (event.type === "pointermove" || event.type === "mousemove") {
+            if (pointInBounds(pos, this._mmxSourceBounds)) {
+                this.tooltip = t("widget.tooltip.sourceBridgeEnabled");
+            } else if (pointInBounds(pos, this._mmxAudioBounds)) {
+                this.tooltip = t("widget.tooltip.audioContextEnabled");
+            } else {
+                this.tooltip = `${t("widget.tooltip.audioContextEnabled")}\n\n${t("widget.tooltip.sourceBridgeEnabled")}`;
+            }
+            return false;
+        }
+        if (event.type !== "pointerdown" && event.type !== "mousedown") return false;
+        if (pointInBounds(pos, this._mmxAudioBounds)) {
+            if (!state.audioContextControlEnabled) return true;
+            this.value = !directorBoolValue(this.value);
+            this._mmxContinuityOriginalCallback?.call(this, this.value, mouseNode, pos, event);
+            refreshDirectorContinuityUi(mouseNode);
+            return true;
+        }
+        if (pointInBounds(pos, this._mmxSourceBounds)) {
+            if (!state.sourceBridgeControlEnabled) return true;
+            const nextValue = state.sourceBridgeChecked ? 0 : SOURCE_BRIDGE_FIXED_FRAMES;
+            notifyWidgetValueChange(mouseNode, source, nextValue, [app.canvas, mouseNode, pos, event]);
+            refreshDirectorContinuityUi(mouseNode);
+            return true;
+        }
+        return false;
+    };
+    node.setDirtyCanvas?.(true, true);
+}
+
+function refreshDirectorContinuityUi(node, editor = node?._minimaxEditor) {
+    if (!node) return null;
+    installDirectorContinuityUi(node);
+    if (!node._mmxContinuityUiInstalled) return null;
+    const source = node.widgets?.find((w) => w.name === "source_overlap_frames");
+    const audio = node.widgets?.find((w) => w.name === "audio_context_enabled");
+    const motion = node.widgets?.find((w) => w.name === "motion_context_enabled");
+    const context = node.widgets?.find((w) => w.name === "context_length");
+    const taskKey = editor?.getTaskKey?.() || resolveTaskKey(
+        node.widgets?.find((w) => w.name === "task_type")?.value,
+    );
+    const segmentCount = editor?.getRunnableSegmentCount?.()
+        ?? editor?.timeline?.segments?.length
+        ?? 1;
+    const state = resolveContinuityUiState({
+        taskKey,
+        segmentCount,
+        motionContextEnabled: motion?.value,
+        contextFrames: context?.value,
+        sourceBridgeValue: source?.value,
+        audioContextEnabled: audio?.value,
+        audioMode: editor?.timeline?.output?.audioMode || "generate",
+    });
+    source.value = state.sourceBridgeValue;
+    node._mmxContinuityUiState = state;
+    setContinuityWidgetEnabled(motion, state.motionContextControlEnabled);
+    setContinuityWidgetEnabled(context, state.contextFramesControlEnabled);
+    audio._mmxContinuityDisabled = !state.audioContextControlEnabled;
+    source._mmxContinuityDisabled = !state.sourceBridgeControlEnabled;
+    audio.options = audio.options || {};
+    const compositeTooltip = `${t("widget.tooltip.audioContextEnabled")}\n\n${t("widget.tooltip.sourceBridgeEnabled")}`;
+    audio.tooltip = compositeTooltip;
+    audio.options.tooltip = compositeTooltip;
+    source.options.tooltip = t("widget.tooltip.sourceBridgeEnabled");
+    if (context) context.label = `↳ ${t("widget.contextLength")}`;
+    if (motion) motion.label = t("widget.motionContextEnabled");
+    if (motion?.options) {
+        motion.options.tooltip = state.motionContextSuppressedByBridge
+            ? t("widget.tooltip.motionContextBridgeSuppressed")
+            : t("widget.tooltip.motionContextEnabled");
+    }
+    const group = node.widgets?.find((w) => w.name === "bd_grp_motion");
+    if (group) group._mmxContinuityStatusText = formatContinuityStatus(state);
+    node.setDirtyCanvas?.(true, true);
+    return state;
 }
 
 function refreshSamplingModeUi(node) {
@@ -419,10 +646,23 @@ function makeGroupHeaderWidget(inputName, inputData) {
         draw(ctx, node, widget_width, y, H) {
             const text = this._mmxSamplingStatusText
                 || (this._mmxGroupI18nKey ? t(this._mmxGroupI18nKey) : (this._bdGroupLabel || label));
-            drawGroupHeader(ctx, node, widget_width, y, H, text);
+            const continuity = inputName === "bd_grp_motion" ? this._mmxContinuityStatusText : "";
+            drawGroupHeader(ctx, node, widget_width, y, continuity ? 26 : H, text);
+            if (continuity) {
+                ctx.save();
+                ctx.fillStyle = "#9da7bc";
+                ctx.font = "10px ui-sans-serif, system-ui, sans-serif";
+                ctx.textAlign = "left";
+                ctx.textBaseline = "middle";
+                ctx.fillText(continuity, 20, y + 38);
+                ctx.fillStyle = "#9da7bc";
+                ctx.font = "600 10px ui-sans-serif, system-ui, sans-serif";
+                ctx.fillText(t("widget.grpMotionContext"), 18, y + 58);
+                ctx.restore();
+            }
         },
         computeSize(width) {
-            return [width, 26];
+            return [width, inputName === "bd_grp_motion" ? 70 : 26];
         },
         mouse() {
             return false;
@@ -900,6 +1140,7 @@ function hookTaskTypeWidget(node) {
         const ed = node._minimaxEditor;
         if (ed?.globalTask) ed.globalTask.value = tw.value;
         ed?.onTaskTypeChanged?.(tw.value);
+        refreshDirectorContinuityUi(node, ed);
         return r;
     };
 }
@@ -918,6 +1159,7 @@ function hookMotionContextWidget(node) {
             ed.renderImageBatchGroups?.();
             ed.scheduleRender?.();
         }
+        refreshDirectorContinuityUi(node, ed);
         return r;
     };
 }
@@ -999,6 +1241,7 @@ function initDirectorEditor(node) {
     const container = node._minimaxDomWidget?.element;
     if (!container) return null;
     try {
+        installDirectorContinuityUi(node);
         hookTaskTypeWidget(node);
         hookMotionContextWidget(node);
         node._minimaxEditor = new MiniMaxH3MotionDirectorEditor(node, container, node._minimaxDomWidget);
@@ -1276,11 +1519,13 @@ class MiniMaxH3MotionDirectorEditor {
                 this._resetLayoutStyles();
                 this.applyZoomWidth();
                 this.syncExternalGroupsTimeline?.();
+                refreshDirectorContinuityUi(this.node, this);
                 this.scheduleSettleRender();
             },
             onClose: () => {
                 if (this.isPlaying) this._stopPlay();
                 this._directorModalOpen = false;
+                refreshDirectorContinuityUi(this.node, this);
             },
             onResize: () => this.onDirectorModalResize(),
         });
@@ -4289,6 +4534,7 @@ class MiniMaxH3MotionDirectorEditor {
         this.root?.classList.toggle("locale-zh", getLocale() !== "en");
         applyI18nDom(this.root);
         applyDirectorWidgetLabels(this.node);
+        refreshDirectorContinuityUi(this.node, this);
         this.populateTaskSelect(this.globalTask, this.taskTypeWidget?.value || this.globalTask?.value);
         this.refreshAspectSelectLabels();
         // Re-apply dynamic UI strings that overwrite data-i18n nodes.
@@ -4824,6 +5070,7 @@ class MiniMaxH3MotionDirectorEditor {
             this.renderRefSlots(this.timeline.global.refs, this.globalRefsBox, true);
         } else if (this.isImageBatch()) this.renderImageBatchGroups();
         else this.updateSelectionUI();
+        refreshDirectorContinuityUi(this.node, this);
     }
 
     normalizeSegments() {
@@ -7999,6 +8246,7 @@ class MiniMaxH3MotionDirectorEditor {
         if (field === "prompt" && this.globalPromptWidget) this.globalPromptWidget.value = value;
         this.scheduleTimelineSync();
         this.scheduleRender();
+        refreshDirectorContinuityUi(this.node, this);
     }
 
     onSegField(field, value) {
