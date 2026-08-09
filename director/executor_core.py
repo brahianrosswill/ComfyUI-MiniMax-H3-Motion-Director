@@ -453,16 +453,17 @@ def execute_director_plan_core(
                     f"Segment {timeline_slot + 1}: explicit {qualifier}Reference Set."
                 )
 
-        raw_clip = resolve_segment_raw_clip(plan, seg)
+        if i2v_continuation:
+            # A continuation has no new raw source by design. Do not ask the
+            # generation timeline for video frames: its source_video is only a
+            # per-segment indexing placeholder, not a timeline frame buffer.
+            raw_clip = torch.zeros((0, 16, 16, 3), dtype=torch.float32)
+        else:
+            raw_clip = resolve_segment_raw_clip(plan, seg)
 
         if seg.source_clip is not None:
             body_raw = seg.source_clip
             target_len = max(target_len, int(body_raw.shape[0]))
-        elif i2v_continuation:
-            # The one-frame gray gen timeline is indexing-only. Passing it as
-            # first_frame would turn a Motion Context continuation into an
-            # unrelated gray-image I2V request.
-            body_raw = torch.zeros((0, 16, 16, 3), dtype=torch.float32)
         else:
             body_raw = raw_clip[:target_len] if int(raw_clip.shape[0]) > target_len else raw_clip
 
