@@ -259,18 +259,15 @@ def build_source_images_output(
 ) -> list[torch.Tensor]:
     if split_outputs:
         chunks: list[torch.Tensor] = []
-        if plan.run_indices is not None:
-            segment_indices = sorted(plan.run_indices)
-        else:
-            segment_indices = list(range(len(plan.segments)))
-        resolved_ranges = getattr(plan, "resolved_source_overlap_ranges", {}) or {}
+        segment_indices = (
+            sorted(plan.run_indices)
+            if plan.run_indices is not None
+            else list(range(len(plan.segments)))
+        )
         for seg_index, generated in zip(segment_indices, images_out):
             seg = plan.segments[seg_index]
             target_len = int(generated.shape[0])
-            start, end = resolved_ranges.get(
-                int(seg.index), (int(seg.start_frame), int(seg.end_frame))
-            )
-            raw = load_timeline_segment(plan.raw, start, end)
+            raw = load_timeline_segment(plan.raw, seg.start_frame, seg.end_frame)
             fitted = _fit_source_clip_to_plan(plan, raw)
             chunks.append(pad_or_trim_frames(fitted, target_len).cpu().float())
         return chunks

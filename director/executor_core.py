@@ -16,7 +16,10 @@ import torch
 
 from ..lib.image_prep import fit_canvas, fit_video_long_edge
 from ..lib.task_modes import SUPPORTED_TASK_KEYS
-from ..nodes.conditioning import run_minimax_conditioning
+from ..nodes.conditioning import (
+    append_minimax_keyframe_anchors,
+    run_minimax_conditioning,
+)
 from ..patches import motion_context_patch_status
 from .core_sampling import sample_single_stage
 from .core_sampling import (
@@ -26,7 +29,7 @@ from .core_sampling import (
 )
 from .frame_align import (
     H3_REFERENCE_VIDEO_PIPELINE,
-    H3_SOURCE_OVERLAP_PIPELINE,
+    H3_SOURCE_BRIDGE_PIPELINE,
     minimax_align_frame_count,
     pad_or_trim_frames,
     prepare_h3_reference_video_clip,
@@ -50,11 +53,11 @@ from .audio_export import (
     resolve_audio_mode,
 )
 from .segment_runtime import (
-    effective_source_overlap_window,
     frames_label,
+    load_source_bridge_clip,
     resolve_segment_raw_clip,
     resolve_segment_raw_clip_with_lookahead,
-    resolve_segment_raw_clip_with_source_overlap,
+    resolve_source_bridge_window,
     segment_passthrough_chunk,
     tensor_frame_to_jpeg_b64,
 )
@@ -72,15 +75,14 @@ from .plan import (
 )
 from .progress import report_director_finish, report_director_progress, report_director_segment_preview
 from .segment_cache import load_segment_cache, save_segment_cache
-from .source_overlap import (
-    SourceOverlapGeneration,
-    assemble_source_overlap_generations,
-    bidirectional_source_overlap_enabled,
+from .source_bridge import (
+    GeneratedSourceBridge,
+    assemble_source_bridges,
+    bridge_anchors,
+    reference_bundles_match,
     should_apply_visual_motion_context,
-)
-from .source_overlap_cache import (
-    load_source_overlap_cache,
-    save_source_overlap_cache,
+    source_bridge_enabled,
+    validate_source_bridge_frames,
 )
 from .segment_continuity import (
     concat_continuous_chunks,
@@ -292,13 +294,18 @@ def execute_director_plan_core(
         )
     motion_enabled = bool(motion_context_enabled)
     requested_context = max(1, int(context_length))
-    requested_source_overlap = max(0, int(source_overlap_frames))
-    plan.source_overlap_frames = requested_source_overlap
+    requested_source_bridge = validate_source_bridge_frames(source_overlap_frames)
+    # Keep the old backend/schema field name for workflow compatibility.
+    plan.source_overlap_frames = requested_source_bridge
     audio_context_requested = bool(audio_context_enabled)
     audio_context_active = bool(
         motion_enabled and audio_context_requested and audio_mode == AUDIO_MODE_GENERATE
     )
-    if motion_enabled and len(plan.segments) > 1:
+    bridge_feature_active = bool(
+        requested_source_bridge == 5
+        and any(seg.task_key in {"v2v", "rv2v"} for seg in plan.segments)
+    )
+    if (motion_enabled or bridge_feature_active) and len(plan.segments) > 1:
         patch_ready, patch_reason = motion_context_patch_status()
         if not patch_ready:
             raise RuntimeError(
@@ -320,8 +327,8 @@ def execute_director_plan_core(
     }
     if any(seg.task_key in {"v2v", "rv2v"} for seg in plan.segments):
         cache_settings["reference_video_pipeline"] = H3_REFERENCE_VIDEO_PIPELINE
-        cache_settings["source_overlap_pipeline"] = H3_SOURCE_OVERLAP_PIPELINE
-        cache_settings["source_overlap_frames"] = requested_source_overlap
+        cache_settings["source_bridge_pipeline"] = H3_SOURCE_BRIDGE_PIPELINE
+        cache_settings["source_overlap_frames"] = requested_source_bridge
     if sampling_mode == "internal":
         cache_settings.update(
             {
@@ -348,48 +355,12 @@ def execute_director_plan_core(
     live_tae_preview = False if raw_live in (False, 0, "0", "false", "False", "off") else True
 
     all_segments = plan.segments
-    source_overlap_windows = {
-        int(seg.index): effective_source_overlap_window(
-            plan, seg, requested_source_overlap
-        )
-        for seg in all_segments
-        if bidirectional_source_overlap_enabled(
-            seg.task_key, requested_source_overlap
-        )
-        and getattr(seg, "source_clip", None) is None
-        and not (plan.raw or {}).get("externalGroups", {}).get("active")
-    }
-    source_overlap_chains: list[list[Any]] = []
-    current_overlap_chain: list[Any] = []
-    for seg in all_segments:
-        if int(seg.index) not in source_overlap_windows:
-            if current_overlap_chain:
-                source_overlap_chains.append(current_overlap_chain)
-                current_overlap_chain = []
-            continue
-        if (
-            current_overlap_chain
-            and int(current_overlap_chain[-1].end_frame) != int(seg.start_frame)
-        ):
-            source_overlap_chains.append(current_overlap_chain)
-            current_overlap_chain = []
-        current_overlap_chain.append(seg)
-    if current_overlap_chain:
-        source_overlap_chains.append(current_overlap_chain)
-    for chain in source_overlap_chains:
-        for left, right in zip(chain, chain[1:]):
-            left_window = source_overlap_windows[int(left.index)]
-            right_window = source_overlap_windows[int(right.index)]
-            common_start = max(left_window.source_start, right_window.source_start)
-            common_end = min(left_window.source_end, right_window.source_end)
-            if common_end <= common_start:
-                raise ValueError(
-                    "V2V/RV2V Source Overlap cannot cross a physical source file "
-                    "boundary or edited timeline jump between Segment %d and "
-                    "Segment %d. Their extended generations would have no common "
-                    "source-time interval for Best Cut."
-                    % (int(left.timeline_index) + 1, int(right.timeline_index) + 1)
-                )
+    source_bridge_pairs = [
+        (left, right)
+        for left, right in zip(all_segments, all_segments[1:])
+        if source_bridge_enabled(left.task_key, requested_source_bridge)
+        and source_bridge_enabled(right.task_key, requested_source_bridge)
+    ]
     # Strictly honor「选择运行」— never force-sample unselected segments.
     run_indices = plan.run_indices if plan.run_indices is not None else frozenset(range(len(all_segments)))
 
@@ -408,15 +379,16 @@ def execute_director_plan_core(
 
     selected_results: dict[int, tuple[torch.Tensor, dict[str, Any]]] = {}
     all_export_results: dict[int, tuple[torch.Tensor, dict[str, Any]]] = {}
-    overlap_generations: dict[int, SourceOverlapGeneration] = {}
+    nominal_generated_frames: dict[int, torch.Tensor] = {}
     reports: list[str] = [plan_summary(plan), "", "Execution path: ComfyUI official MiniMax H3"]
     reports.append(f"Motion Context: {'ON' if motion_enabled else 'OFF'}")
     reports.append(f"Context frames: {requested_context}")
-    reports.append(f"Source Overlap frames: {requested_source_overlap} (V2V/RV2V only)")
-    if source_overlap_windows:
+    reports.append(f"Source Bridge frames: {requested_source_bridge} (V2V/RV2V only)")
+    if source_bridge_pairs:
         reports.append(
-            "Source Overlap v2: bidirectional generated overlap + RGB MAD Best Cut; "
-            "visual Motion Context skipped for V2V/RV2V."
+            "Source Bridge v1: nominal segment generations + an independent "
+            "H3-native five-frame anchored bridge; visual Motion Context skipped "
+            "for V2V/RV2V."
         )
     reports.append(f"Audio context: {'ON' if audio_context_active else 'OFF'}")
     reports.append(f"Sampling mode: {sampling_mode} (automatic connection detection)")
@@ -481,11 +453,7 @@ def execute_director_plan_core(
 
     def _run_one_segment(
         seg, *, progress_index: int
-    ) -> tuple[
-        torch.Tensor,
-        dict[str, Any] | None,
-        SourceOverlapGeneration | None,
-    ]:
+    ) -> tuple[torch.Tensor, dict[str, Any] | None]:
         if seg.task_key not in SUPPORTED_TASK_KEYS:
             raise ValueError(
                 f"Task '{seg.task_key}' is not supported on MiniMax H3 Motion Director. "
@@ -569,40 +537,25 @@ def execute_director_plan_core(
         else:
             visible_clip_frames = None
 
-        overlap_window = source_overlap_windows.get(int(seg.index))
-        source_overlap_active = overlap_window is not None
-        source_overlap_head = (
-            int(overlap_window.head_overlap) if overlap_window is not None else 0
-        )
-        source_overlap_tail = (
-            int(overlap_window.tail_overlap) if overlap_window is not None else 0
-        )
-        internal_target_len = (
-            int(overlap_window.frame_count) if overlap_window is not None else target_len
+        source_bridge_active = source_bridge_enabled(
+            seg.task_key, requested_source_bridge
         )
         apply_visual_context = should_apply_visual_motion_context(
             motion_enabled,
             seg.task_key,
             timeline_slot,
-            requested_source_overlap,
+            requested_source_bridge,
             explicit_i2v_reset,
         )
 
         reference_clip_frames = None
         if seg.task_key in {"v2v", "rv2v"}:
-            reference_base_frames = internal_target_len
+            reference_base_frames = target_len
             reference_target_frames = minimax_align_frame_count(reference_base_frames)
             requested_lookahead = max(
                 0, reference_target_frames - reference_base_frames
             )
-            if source_overlap_active:
-                reference_raw = resolve_segment_raw_clip_with_source_overlap(
-                    plan,
-                    seg,
-                    window=overlap_window,
-                    end_extra=requested_lookahead,
-                )
-            elif requested_lookahead > 0:
+            if requested_lookahead > 0:
                 reference_raw = resolve_segment_raw_clip_with_lookahead(
                     plan,
                     seg,
@@ -635,25 +588,15 @@ def execute_director_plan_core(
                     prepared_reference_raw,
                     plan.ref_max_size,
                 )
-            target_generation_line = (
-                f"H3 target generation = {reference_target_frames} frames\n"
-                if source_overlap_active
-                else ""
-            )
             reports.append(
                 f"Segment {timeline_slot + 1} {seg.task_key.upper()}:\n"
                 f"visible source = {visible_source_count} frames\n"
-                f"source head overlap = {source_overlap_head} frames\n"
-                f"source tail overlap = {source_overlap_tail} frames\n"
-                f"combined source = {internal_target_len} frames\n"
                 f"<Video 1> H3 reference = "
                 f"{int(reference_clip_frames.shape[0])} frames\n"
-                f"{target_generation_line}"
                 f"reference lookahead = {reference_lookahead} frames\n"
                 f"reference tail pad = {reference_tail_pad} frames\n"
                 f"visual motion context = "
-                f"{'unchanged' if apply_visual_context else ('skipped' if source_overlap_active else 'off')}\n"
-                f"internal target = {internal_target_len} frames\n"
+                f"{'unchanged' if apply_visual_context else ('skipped' if source_bridge_active else 'off')}\n"
                 f"nominal visible output = {target_len} frames"
             )
 
@@ -694,7 +637,7 @@ def execute_director_plan_core(
                     f"Segment {timeline_slot + 1}: requested {requested_context} "
                     f"context frames, using H3-valid exported tail {context_span}."
                 )
-        generation_request = internal_target_len + context_span
+        generation_request = target_len + context_span
         num_frames = minimax_align_frame_count(generation_request)
         if visible_clip_frames is not None:
             # Motion over-generation belongs to the target timeline, not to a
@@ -884,65 +827,13 @@ def execute_director_plan_core(
         )
 
         fps = float(plan.frame_rate or 24.0)
-        overlap_generation: SourceOverlapGeneration | None = None
-        if source_overlap_active:
-            # Remove only H3's alignment tail.  The real head/body/tail source
-            # interval remains intact until adjacent generations choose a cut.
-            decoded, audio_dict = trim_segment_av(
-                decoded,
-                audio_dict,
-                head_frames=context_span,
-                target_frames=internal_target_len,
-                fps=fps,
-            )
-            extended_chunk = decoded.cpu().float()
-            extended_audio = None
-            if audio_has_samples(audio_dict):
-                extended_audio = {
-                    "waveform": audio_dict["waveform"].detach().cpu(),
-                    "sample_rate": int(audio_dict["sample_rate"]),
-                }
-            overlap_generation = SourceOverlapGeneration(
-                frames=extended_chunk,
-                audio=extended_audio,
-                source_start=int(overlap_window.source_start),
-                source_end=int(overlap_window.source_end),
-                nominal_start=int(overlap_window.nominal_start),
-                nominal_end=int(overlap_window.nominal_end),
-                head_overlap=source_overlap_head,
-                tail_overlap=source_overlap_tail,
-                fps=fps,
-                segment_index=timeline_slot,
-            )
-            if not save_source_overlap_cache(
-                node_id,
-                seg,
-                plan,
-                generation=overlap_generation,
-                settings=cache_settings,
-            ):
-                reports.append(
-                    f"Segment {ui_idx + 1}: extended Source Overlap cache write "
-                    "failed; Best Cut selection-run reuse will be unavailable."
-                )
-
-            # A nominal view is retained only for existing non-overlap
-            # continuation/cache consumers.  It is never used for Best Cut.
-            decoded, audio_dict = trim_segment_av(
-                extended_chunk,
-                extended_audio,
-                head_frames=source_overlap_head,
-                target_frames=target_len,
-                fps=fps,
-            )
-        else:
-            decoded, audio_dict = trim_segment_av(
-                decoded,
-                audio_dict,
-                head_frames=context_span,
-                target_frames=target_len,
-                fps=fps,
-            )
+        decoded, audio_dict = trim_segment_av(
+            decoded,
+            audio_dict,
+            head_frames=context_span,
+            target_frames=target_len,
+            fps=fps,
+        )
 
         chunk = decoded.cpu().float()
         if audio_has_samples(audio_dict):
@@ -978,7 +869,7 @@ def execute_director_plan_core(
         )
 
         if (
-            not source_overlap_active
+            not source_bridge_active
             and seg.task_key in {"t2v", "i2v", "r2v", "fl2v", "v2v", "rv2v"}
             and decoded.shape[0] >= 1
         ):
@@ -1007,14 +898,10 @@ def execute_director_plan_core(
             f"Segment {ui_idx + 1}/{timeline_seg_total}: {task_hint} "
             f"({target_len} frames, seed={seed})"
         )
-        if (
-            source_overlap_active
-        ):
+        if source_bridge_active:
             reports.append(
                 f"Segment {ui_idx + 1}: visual Motion Context skipped; "
-                f"generated source window = [{overlap_window.source_start}, "
-                f"{overlap_window.source_end}) "
-                f"(head={source_overlap_head}, tail={source_overlap_tail})."
+                "nominal segment generation retained for Source Bridge anchors."
             )
         elif motion_info is None:
             reports.append(f"Segment {ui_idx + 1}: no previous context")
@@ -1030,34 +917,38 @@ def execute_director_plan_core(
             "MiniMax H3 Motion Director segment %d/%d done (%d frames, task=%s)",
             ui_idx + 1, timeline_seg_total, target_len, seg.task_key,
         )
-        return chunk, audio_dict, overlap_generation
+        return chunk, audio_dict
 
     for seg in all_segments:
         if seg.index in run_indices:
             if clear_vram_between_segments and selected_results:
                 cleanup_segment_vram(enabled=True)
-            chunk, audio_dict, overlap_generation = _run_one_segment(
+            chunk, audio_dict = _run_one_segment(
                 seg, progress_index=progress_pos[seg.index]
             )
-            if overlap_generation is not None:
-                overlap_generations[int(seg.timeline_index)] = overlap_generation
-            else:
-                result = (chunk, audio_dict or {})
-                selected_results[int(seg.index)] = result
-                if plan.export_mode == "all":
-                    all_export_results[int(seg.index)] = result
-            continue
-
-        if int(seg.index) in source_overlap_windows:
-            # Best Cut loads validated extended caches after all selected
-            # segments finish; never substitute a nominal/trimmed cache here.
+            result = (chunk, audio_dict or {})
+            nominal_generated_frames[int(seg.index)] = chunk
+            selected_results[int(seg.index)] = result
+            if plan.export_mode == "all":
+                all_export_results[int(seg.index)] = result
             continue
 
         if plan.export_mode != "all":
             continue
 
         cached_context = None
-        if motion_enabled:
+        if source_bridge_enabled(seg.task_key, requested_source_bridge):
+            # Source Bridge anchors require the nominal generated segment cache,
+            # never an exported Motion Context tail or source passthrough.
+            cached = load_segment_cache(node_id, seg, plan)
+            cached_context = load_motion_context_cache(
+                node_id,
+                seg,
+                plan,
+                settings=cache_settings,
+                strict=False,
+            ) if motion_enabled else None
+        elif motion_enabled:
             cached_context = load_motion_context_cache(
                 node_id,
                 seg,
@@ -1070,6 +961,8 @@ def execute_director_plan_core(
             cached = load_segment_cache(node_id, seg, plan)
         if cached is not None:
             cached = cached.float()
+            if source_bridge_enabled(seg.task_key, requested_source_bridge):
+                nominal_generated_frames[int(seg.index)] = cached
             completed_outputs[seg.index] = cached
             if cached_context is not None:
                 completed_contexts[int(seg.timeline_index)] = cached_context
@@ -1106,8 +999,6 @@ def execute_director_plan_core(
             "unselected gaps filled from cache/source for「全部导出」."
         )
 
-    resolved_ranges: dict[int, tuple[int, int]] = {}
-
     def _report_resolved_preview(seg, frames: torch.Tensor) -> None:
         if int(frames.shape[0]) <= 0:
             return
@@ -1127,98 +1018,219 @@ def execute_director_plan_core(
                 fps=float(plan.frame_rate or 24),
             )
         except Exception as exc:
-            log.debug("Resolved Source Overlap preview skipped: %s", exc)
+            log.debug("Resolved Source Bridge preview skipped: %s", exc)
 
-    for chain in source_overlap_chains:
-        chain_indices = {int(seg.index) for seg in chain}
-        needed = plan.export_mode == "all" or bool(chain_indices.intersection(run_indices))
-        if not needed:
+    def _nominal_for_bridge(seg) -> torch.Tensor:
+        index = int(seg.index)
+        frames = nominal_generated_frames.get(index)
+        if frames is not None:
+            return frames
+        frames = load_segment_cache(node_id, seg, plan)
+        if frames is None:
+            raise ValueError(
+                "Source Bridge requires both adjacent generated segments. Run the "
+                "complete sequence once or generate the missing adjacent segment first."
+            )
+        frames = frames.detach().cpu().float()
+        if int(frames.shape[0]) != int(seg.frame_count):
+            raise ValueError(
+                "Source Bridge requires both adjacent generated segments. Run the "
+                "complete sequence once or generate the missing adjacent segment first."
+            )
+        nominal_generated_frames[index] = frames
+        reports.append(
+            f"Segment {int(seg.timeline_index) + 1}: loaded validated nominal "
+            "segment cache for Source Bridge."
+        )
+        return frames
+
+    generated_bridges: list[GeneratedSourceBridge] = []
+    for left, right in source_bridge_pairs:
+        pair_indices = {int(left.index), int(right.index)}
+        if plan.export_mode != "all" and not pair_indices.intersection(run_indices):
             continue
 
-        for seg in chain:
-            timeline_slot = int(seg.timeline_index)
-            if timeline_slot in overlap_generations:
-                continue
-            cached_generation = load_source_overlap_cache(
-                node_id,
-                seg,
-                plan,
-                settings=cache_settings,
-                strict=True,
-            )
-            overlap_generations[timeline_slot] = cached_generation
+        window, skip_reason = resolve_source_bridge_window(plan, left, right)
+        if window is None:
             reports.append(
-                f"Segment {timeline_slot + 1}/{timeline_seg_total}: loaded "
-                "validated extended Source Overlap cache "
-                f"([{cached_generation.source_start}, "
-                f"{cached_generation.source_end}))"
+                f"Boundary Segment {int(left.timeline_index) + 1} → "
+                f"{int(right.timeline_index) + 1}: {skip_reason} "
+                "Nominal hard cut retained."
             )
+            continue
+        if (
+            "rv2v" in {left.task_key, right.task_key}
+            and not reference_bundles_match(left, right)
+        ):
+            reports.append(
+                f"Boundary Segment {int(left.timeline_index) + 1} → "
+                f"{int(right.timeline_index) + 1}: Source Bridge skipped because "
+                "the effective RV2V Picture/Audio reference bundles differ. "
+                "Nominal hard cut retained."
+            )
+            continue
 
-        assembly = assemble_source_overlap_generations(
-            [overlap_generations[int(seg.timeline_index)] for seg in chain]
+        left_frames = _nominal_for_bridge(left)
+        right_frames = _nominal_for_bridge(right)
+        first_anchor, last_anchor = bridge_anchors(
+            left, left_frames, right, right_frames, window
         )
-        segment_by_slot = {int(seg.timeline_index): seg for seg in chain}
-        for boundary in assembly.boundaries:
-            reports.append(
-                f"Boundary Segment {boundary.left_segment_index + 1} → "
-                f"{boundary.right_segment_index + 1}:\n"
-                f"common generated source time = "
-                f"[{boundary.common_start}, {boundary.common_end})\n"
-                f"nominal boundary = {boundary.nominal_boundary}\n"
-                f"resolved cut = {boundary.resolved_cut}\n"
-                f"cut offset = {boundary.cut_offset:+d}\n"
-                f"best seam score = {boundary.score:.9f}"
+        bridge_raw = load_source_bridge_clip(plan, window)
+        if plan.output_mode == "fixed":
+            bridge_source = fit_canvas(bridge_raw, plan.width, plan.height)
+        else:
+            bridge_source = fit_video_long_edge(bridge_raw, plan.ref_max_size)
+        bridge_height = int(bridge_source.shape[1])
+        bridge_width = int(bridge_source.shape[2])
+
+        bridge_prompt = right.prompt if right.prompt != left.prompt else left.prompt
+        if right.task_key == "v2v":
+            bridge_prompt = reinforce_v2v_prompt(bridge_prompt)
+        else:
+            ref_idxs = [
+                int(getattr(ref, "index", 0))
+                for ref in (right.refs or [])
+                if ref is not None
+            ]
+            audio_idxs = [
+                int(getattr(ref, "index", 0))
+                for ref in (right.ref_audios or [])
+                if ref is not None
+            ]
+            bridge_prompt = reinforce_rv2v_prompt(
+                bridge_prompt,
+                ref_indices=ref_idxs,
+                audio_indices=audio_idxs,
             )
 
-        for contribution in assembly.contributions:
-            seg = segment_by_slot[int(contribution.segment_index)]
-            frames = contribution.frames.detach().cpu().float()
-            resolved_audio = dict(contribution.audio or {})
-            resolved_audio.update(
-                {
-                    "source_overlap_resolved": True,
-                    "source_start": int(contribution.source_start),
-                    "source_end": int(contribution.source_end),
-                    "frame_count": int(contribution.frame_count),
-                    "fps": float(plan.frame_rate or 24.0),
-                }
+        (
+            _unused_first,
+            _unused_last,
+            ref_images,
+            ref_videos,
+            ref_audios,
+            ref_video_audios,
+        ) = _build_minimax_inputs(
+            plan,
+            right,
+            clip_frames=bridge_source,
+            reference_clip_frames=bridge_source,
+            ctx_w=bridge_width,
+            ctx_h=bridge_height,
+            prev_tail=None,
+        )
+        positive, negative, latent, _task_hint = run_minimax_conditioning(
+            clip=clip,
+            vae=vae,
+            audio_vae=audio_vae,
+            prompt=bridge_prompt,
+            width=bridge_width,
+            height=bridge_height,
+            length=5,
+            task_key=right.task_key,
+            first_frame=None,
+            last_frame=None,
+            ref_images=ref_images,
+            ref_videos=ref_videos,
+            ref_video_audios=ref_video_audios,
+            ref_audios=ref_audios,
+        )
+        positive = append_minimax_keyframe_anchors(
+            positive,
+            vae=vae,
+            first_frame=first_anchor,
+            last_frame=last_anchor,
+            frame_count=5,
+            width=bridge_width,
+            height=bridge_height,
+        )
+        if clear_vram_between_segments:
+            cleanup_segment_vram(enabled=True, unload_models=True)
+        try:
+            bridge_samples = sample_single_stage(
+                model=model,
+                positive=positive,
+                negative=negative,
+                latent=latent,
+                seed=seed,
+                cfg=cfg,
+                steps=steps,
+                sampler_name=sampler,
+                scheduler=scheduler,
+                shift_video=shift_video,
+                shift_audio=shift_audio,
+                external_sampler=external_sampler,
+                external_sigmas=external_sigmas,
             )
-            result = (frames, resolved_audio)
-            resolved_ranges[int(seg.index)] = (
-                int(contribution.source_start),
-                int(contribution.source_end),
+        except torch.cuda.OutOfMemoryError as exc:
+            raise RuntimeError(
+                "Motion Director ran out of VRAM while sampling the five-frame "
+                "Source Bridge. No source frame or nominal hard cut was silently "
+                "substituted."
+            ) from exc
+        bridge_decoded, _ignored_audio = _decode_av_latent(
+            bridge_samples, vae, audio_vae, decode_audio=False
+        )
+        if int(bridge_decoded.shape[0]) < 5:
+            raise ValueError(
+                "Source Bridge H3 decode returned fewer than 5 frames; refusing "
+                "to expose source conditioning pixels or pad generated output."
             )
-            completed_outputs[int(seg.index)] = frames
-            if int(seg.index) in run_indices:
-                selected_results[int(seg.index)] = result
-                _report_resolved_preview(seg, frames)
-                save_segment_cache(node_id, seg, plan, frames)
-                if motion_enabled:
-                    save_motion_context_cache(
-                        node_id,
-                        seg,
-                        plan,
-                        frames=frames,
-                        audio=resolved_audio if audio_has_samples(resolved_audio) else None,
-                        settings=cache_settings,
-                    )
-            if plan.export_mode == "all":
-                all_export_results[int(seg.index)] = result
-            reports.append(
-                f"Segment {int(seg.timeline_index) + 1}: resolved contribution = "
-                f"[{contribution.source_start}, {contribution.source_end}) "
-                f"({contribution.frame_count} frames)"
+        bridge_frames = bridge_decoded[:5].detach().cpu().float()
+        generated_bridges.append(
+            GeneratedSourceBridge(
+                left_segment_index=int(left.index),
+                right_segment_index=int(right.index),
+                window=window,
+                frames=bridge_frames,
             )
+        )
+        reports.append(
+            f"Boundary Segment {int(left.timeline_index) + 1} → "
+            f"{int(right.timeline_index) + 1}:\n"
+            f"source frames = {window.source_start}..{window.source_end - 1}\n"
+            "length = 5\n"
+            f"seed = {seed}\n"
+            f"first anchor = Segment {int(left.timeline_index) + 1} source "
+            f"frame {window.first_anchor_source_time}\n"
+            f"last anchor = Segment {int(right.timeline_index) + 1} source "
+            f"frame {window.last_anchor_source_time}\n"
+            f"emitted bridge frames = {window.emitted_source_start}.."
+            f"{window.emitted_source_end - 1} (decoded[1:4])\n"
+            "visual Motion Context = skipped\n"
+            "audio = unchanged nominal segment audio"
+        )
+        if clear_vram_between_segments:
+            cleanup_segment_vram(enabled=True)
 
-    if resolved_ranges:
-        # Runtime-only metadata used by optional split source comparison output.
-        plan.resolved_source_overlap_ranges = resolved_ranges
+    if generated_bridges:
+        resolved = assemble_source_bridges(
+            all_segments,
+            nominal_generated_frames,
+            generated_bridges,
+        )
+        for index, frames in resolved.items():
+            completed_outputs[index] = frames
+            if index in selected_results:
+                selected_results[index] = (frames, selected_results[index][1])
+            if index in all_export_results:
+                all_export_results[index] = (frames, all_export_results[index][1])
+
+    # Bridge-mode previews always show the final contribution.  Internal
+    # source conditioning and the two anchor endpoints are never exposed.
+    for seg in all_segments:
+        if (
+            int(seg.index) in run_indices
+            and source_bridge_enabled(seg.task_key, requested_source_bridge)
+            and int(seg.index) in selected_results
+        ):
+            _report_resolved_preview(seg, selected_results[int(seg.index)][0])
 
     missing_selected = [index for index in run_list if index not in selected_results]
     if missing_selected:
         raise RuntimeError(
             "Motion Director internal error: selected segment result(s) missing after "
-            f"Source Overlap resolution: {[i + 1 for i in missing_selected]}"
+            f"Source Bridge resolution: {[i + 1 for i in missing_selected]}"
         )
     segment_outputs = [selected_results[index][0] for index in run_list]
     segment_audios = [selected_results[index][1] for index in run_list]
@@ -1241,9 +1253,9 @@ def execute_director_plan_core(
         export_chunks = segment_outputs
         export_audios = segment_audios
         export_segments = [all_segments[i] for i in run_list]
-    if motion_enabled or resolved_ranges:
+    if motion_enabled or bridge_feature_active:
         # Legacy continuity also applies post-decode seam grading in concat.
-        # Motion Context and Source Overlap Best Cut each own their handoff, so
+        # Motion Context and Source Bridge each own their handoff, so
         # bypass every legacy post-decode seam rewrite.
         from ..lib.image_prep import cat_frames_variable_size
 

@@ -23,7 +23,11 @@ from ..lib.video_io import (
 )
 from .frame_align import pad_or_trim_frames
 from .plan import DirectorPlan
-from .source_overlap import SOURCE_OVERLAP_TASKS, SourceOverlapWindow
+from .source_bridge import (
+    SOURCE_BRIDGE_TASKS,
+    SourceBridgeWindow,
+    bridge_window_for_boundary,
+)
 
 
 def needs_source_video(task_key: str) -> bool:
@@ -35,125 +39,75 @@ def is_gen_timeline_plan(plan: DirectorPlan) -> bool:
     return mode in ("gen_blank", "gen_image", "prompt_batch", "image_batch", "fl2v")
 
 
-def _timeline_neighbors(plan: DirectorPlan, seg):
-    ordered = sorted(
-        list(getattr(plan, "segments", None) or []),
-        key=lambda item: int(getattr(item, "timeline_index", item.index)),
-    )
-    position = next(
-        (
-            index
-            for index, candidate in enumerate(ordered)
-            if candidate is seg
-            or int(getattr(candidate, "timeline_index", candidate.index))
-            == int(getattr(seg, "timeline_index", seg.index))
-        ),
-        None,
-    )
-    if position is None:
-        return None, None
-    previous = ordered[position - 1] if position > 0 else None
-    following = ordered[position + 1] if position + 1 < len(ordered) else None
-    return previous, following
-
-
-def _same_overlap_chain(left, right) -> bool:
-    return bool(
-        left is not None
-        and right is not None
-        and getattr(left, "task_key", "") in SOURCE_OVERLAP_TASKS
-        and getattr(right, "task_key", "") in SOURCE_OVERLAP_TASKS
-        and getattr(left, "source_clip", None) is None
-        and getattr(right, "source_clip", None) is None
-        and int(left.end_frame) == int(right.start_frame)
-    )
-
-
-def _available_contiguous_source_frames(
+def resolve_source_bridge_window(
     plan: DirectorPlan,
-    boundary: int,
-    requested: int,
-    *,
-    direction: int,
-) -> int:
-    requested = max(0, int(requested))
-    if requested <= 0:
-        return 0
-    sv = plan.source_video
-    if is_gen_timeline_plan(plan) and sv is not None and int(sv.shape[0]) > 0:
-        total = int(sv.shape[0])
-        return min(requested, boundary if direction < 0 else max(0, total - boundary))
-
-    total = logical_frame_count(plan.raw)
-    if boundary <= 0 and direction < 0:
-        return 0
-    if boundary >= total and direction > 0:
-        return 0
-    anchor = boundary - 1 if direction > 0 else boundary
-    if anchor < 0 or anchor >= total:
-        return 0
-    clip_index, source_frame = resolve_logical_frame_entry(plan.raw, anchor)
-    actual = 0
-    if direction < 0:
-        expected = source_frame - 1
-        indices = range(boundary - 1, max(-1, boundary - requested - 1), -1)
-    else:
-        expected = source_frame + 1
-        indices = range(boundary, min(total, boundary + requested))
-    for logical_index in indices:
-        next_clip, next_source = resolve_logical_frame_entry(plan.raw, logical_index)
-        if next_clip != clip_index or next_source != expected:
-            break
-        actual += 1
-        expected += direction
-    return actual
-
-
-def effective_source_overlap_window(
-    plan: DirectorPlan,
-    seg,
-    requested_frames: int,
-) -> SourceOverlapWindow:
-    """Return the safe bidirectional real-source window for one segment."""
-    nominal_start = max(0, int(seg.start_frame))
-    nominal_end = max(nominal_start, int(seg.end_frame))
-    requested = max(0, int(requested_frames))
+    left_segment,
+    right_segment,
+) -> tuple[SourceBridgeWindow | None, str | None]:
+    """Resolve an exact five-frame source window or a safe hard-cut reason."""
     if (
-        requested <= 0
-        or getattr(seg, "task_key", "") not in SOURCE_OVERLAP_TASKS
-        or getattr(seg, "source_clip", None) is not None
+        getattr(left_segment, "task_key", "") not in SOURCE_BRIDGE_TASKS
+        or getattr(right_segment, "task_key", "") not in SOURCE_BRIDGE_TASKS
+    ):
+        return None, "Source Bridge applies only to adjacent V2V/RV2V segments."
+    boundary = int(right_segment.start_frame)
+    if int(left_segment.end_frame) != boundary:
+        return None, "Source Bridge skipped: the segment boundary is discontinuous."
+    if (
+        int(left_segment.start_frame) > boundary - 2
+        or int(right_segment.end_frame) < boundary + 3
+    ):
+        return None, (
+            "Source Bridge skipped: five continuous source frames and both "
+            "generated anchor positions are not available around this boundary."
+        )
+    if (
+        getattr(left_segment, "source_clip", None) is not None
+        or getattr(right_segment, "source_clip", None) is not None
         or (plan.raw or {}).get("externalGroups", {}).get("active")
     ):
-        return SourceOverlapWindow(
-            nominal_start, nominal_end, nominal_start, nominal_end, 0, 0
+        return None, "Source Bridge skipped: no shared physical source timeline."
+
+    window = bridge_window_for_boundary(boundary)
+    if window.source_start < 0:
+        return None, "Source Bridge skipped: five continuous source frames are unavailable at BOF."
+
+    sv = getattr(plan, "source_video", None)
+    if is_gen_timeline_plan(plan) and isinstance(sv, torch.Tensor) and int(sv.shape[0]) > 0:
+        if window.source_end > int(sv.shape[0]):
+            return None, "Source Bridge skipped: five continuous source frames are unavailable at EOF."
+        return window, None
+
+    total = logical_frame_count(plan.raw)
+    if window.source_end > total:
+        return None, "Source Bridge skipped: five continuous source frames are unavailable at EOF."
+    first_clip, first_source = resolve_logical_frame_entry(plan.raw, window.source_start)
+    for offset, logical_index in enumerate(range(window.source_start, window.source_end)):
+        clip_index, source_frame = resolve_logical_frame_entry(plan.raw, logical_index)
+        if clip_index != first_clip:
+            return None, "Source Bridge skipped: the window crosses a physical source file boundary."
+        if source_frame != first_source + offset:
+            return None, "Source Bridge skipped: the source timeline contains an edited discontinuity."
+    return window, None
+
+
+def load_source_bridge_clip(
+    plan: DirectorPlan,
+    window: SourceBridgeWindow,
+) -> torch.Tensor:
+    """Load the five real source frames used only as Bridge conditioning."""
+    if window is None or int(window.frame_count) != 5:
+        raise ValueError("Source Bridge requires exactly five continuous source frames.")
+    sv = getattr(plan, "source_video", None)
+    if is_gen_timeline_plan(plan) and isinstance(sv, torch.Tensor) and int(sv.shape[0]) > 0:
+        clip = sv[int(window.source_start) : int(window.source_end)].clone()
+    else:
+        clip = load_timeline_segment(plan.raw, window.source_start, window.source_end)
+    if int(clip.shape[0]) != 5:
+        raise ValueError(
+            "Source Bridge requires exactly five real continuous source frames; padding is not allowed."
         )
-
-    previous, following = _timeline_neighbors(plan, seg)
-    allow_head = _same_overlap_chain(previous, seg)
-    allow_tail = _same_overlap_chain(seg, following)
-    head_request = requested if allow_head else 0
-    tail_request = requested if allow_tail else 0
-
-    # A very short middle segment must leave strictly ordered cut windows.
-    if head_request and tail_request:
-        per_side_limit = max(0, (nominal_end - nominal_start - 1) // 2)
-        head_request = min(head_request, per_side_limit)
-        tail_request = min(tail_request, per_side_limit)
-
-    head = _available_contiguous_source_frames(
-        plan, nominal_start, head_request, direction=-1
-    )
-    tail = _available_contiguous_source_frames(
-        plan, nominal_end, tail_request, direction=1
-    )
-    return SourceOverlapWindow(
-        source_start=nominal_start - head,
-        source_end=nominal_end + tail,
-        nominal_start=nominal_start,
-        nominal_end=nominal_end,
-        head_overlap=head,
-        tail_overlap=tail,
-    )
+    return clip
 
 
 def resolve_segment_raw_clip(plan: DirectorPlan, seg) -> torch.Tensor:
@@ -220,68 +174,6 @@ def resolve_segment_raw_clip_with_lookahead(
         safe_end = visible_end
         expected_source_frame = source_frame + 1
         for logical_index in range(visible_end, end):
-            next_clip, next_source_frame = resolve_logical_frame_entry(
-                plan.raw, logical_index
-            )
-            if (
-                next_clip != clip_index
-                or next_source_frame != expected_source_frame
-            ):
-                break
-            safe_end = logical_index + 1
-            expected_source_frame += 1
-        end = safe_end
-
-    if end <= start:
-        return resolve_segment_raw_clip(plan, seg)
-    return load_timeline_segment(plan.raw, start, end)
-
-
-def resolve_segment_raw_clip_with_source_overlap(
-    plan: DirectorPlan,
-    seg,
-    *,
-    window: SourceOverlapWindow | None = None,
-    overlap_frames: int | None = None,
-    end_extra: int = 0,
-) -> torch.Tensor:
-    """Load one V2V/RV2V reference window from the original source timeline.
-
-    The returned tensor is ``head + visible + tail + safe lookahead``.
-    It never contains the previous segment's generated output. Forward
-    lookahead follows the same physical-continuity rule as the existing H3
-    reference preparation, while BOF and clip boundaries reduce the overlap.
-    """
-    if window is None:
-        window = effective_source_overlap_window(
-            plan, seg, int(overlap_frames or 0)
-        )
-    if window.head_overlap <= 0 and window.tail_overlap <= 0:
-        return resolve_segment_raw_clip_with_lookahead(
-            plan, seg, end_extra=end_extra
-        )
-
-    extra = max(0, int(end_extra))
-    start = int(window.source_start)
-    internal_end = int(window.source_end)
-
-    sv = plan.source_video
-    if is_gen_timeline_plan(plan) and sv is not None and int(sv.shape[0]) > 0:
-        end = min(internal_end + extra, int(sv.shape[0]))
-        if end > start:
-            return sv[start:end].clone()
-
-    total = logical_frame_count(plan.raw)
-    internal_end = min(internal_end, total)
-    end = min(internal_end + extra, total)
-
-    if end > internal_end and internal_end > start:
-        clip_index, source_frame = resolve_logical_frame_entry(
-            plan.raw, internal_end - 1
-        )
-        safe_end = internal_end
-        expected_source_frame = source_frame + 1
-        for logical_index in range(internal_end, end):
             next_clip, next_source_frame = resolve_logical_frame_entry(
                 plan.raw, logical_index
             )

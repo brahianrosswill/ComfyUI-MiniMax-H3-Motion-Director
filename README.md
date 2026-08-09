@@ -24,9 +24,13 @@ official distribution of either upstream project.
 - T2V, I2V, FL2V, R2V, V2V and RV2V modes
 - Multi-segment timeline with per-segment prompts
 - Image, video and audio references
-- Previous segment to next segment Motion Context continuity
+- Task-aware continuity: Motion Context for generated-continuation tasks and
+  Source Bridge for source-video editing tasks
+- H3-native five-frame Source Bridge for V2V/RV2V segment boundaries
+- Native H3 reference + keyframe-anchor coexistence
+- Original V2V/RV2V frames are conditioning only; final Bridge pixels are regenerated
 - Generated-audio continuation between segments
-- Recommended 22-frame Motion Context
+- 22-frame Motion Context baseline for generated-continuation tasks
 - Full-sequence generation or selected-segment runs
 - Exact requested visible video length with matching audio length
 - Independent node IDs, allowing AIMixer Director to remain installed
@@ -37,6 +41,7 @@ Actually tested by the author with real local MiniMax H3 generation:
 
 - T2V
 - I2V
+- RV2V basic generation and continuity A/B comparisons
 
 Implemented but not yet validated by the author with full real-generation
 tests:
@@ -44,10 +49,23 @@ tests:
 - FL2V
 - R2V
 - V2V
-- RV2V
 
-The implemented mode list and the actually tested mode list are intentionally
-separate. The four modes above should not yet be read as fully validated.
+Source Bridge v1 has automated unit and ComfyUI runtime tests, but has **not**
+yet received real GPU seam-quality validation. Its status is experimental. The
+implemented mode list and the actually tested mode list are intentionally
+separate; automated tests prove code behavior, not visual seam quality.
+
+Current local RV2V continuity observations from the pre-Bridge A/B tests:
+
+- Motion Context OFF preserves source motion most strongly, but leaves a hard seam.
+- Motion Context 1 is the best current overall A/B baseline: a smoother seam,
+  with some source-motion fidelity loss.
+- Motion Context 5 produced a more visible motion-timing shift.
+- Motion Context 22 produced the most stable seam in that clip, but interfered
+  clearly with the current `<Video 1>` motion and is not the RV2V default.
+- The removed RGB Best Cut prototype improved fidelity in places, but still showed
+  visible seams and motion repetition.
+- Source Bridge is the new experimental direction and still needs real GPU validation.
 
 ## Demo Results
 
@@ -131,15 +149,32 @@ After restarting, search for **MiniMax H3 Motion Director** in the node menu.
 2. Add **MiniMax H3 Motion Director** and choose the required task mode.
 3. Enter the prompt and build one or more segments in the Director timeline.
 4. Add the images, videos or audio required by the selected task mode.
-5. Use the Motion Context settings below and queue the workflow.
+5. Choose the task-aware continuity setting below and queue the workflow.
 
 The Director can generate the full timeline or only selected segments. When a
-later segment is selected by itself, its preceding Motion Context must already
-exist in the cache.
+later segment is selected by itself, the continuity data it needs must already
+exist in cache. Motion Context needs the preceding exported context cache;
+Source Bridge needs both adjacent nominal generated-segment caches.
+
+## Task-Aware Continuity
+
+| Task | Recommended continuity | Starting setting | Reason |
+|---|---|---|---|
+| T2V | Motion Context | 22 | The next segment has no complete source-video motion, so it needs the previous generated state. |
+| I2V | Motion Context | 22 | Continue generated state after the first image; an explicit new image resets it. |
+| FL2V | Motion Context / explicit anchors | 22 as chaining baseline | Use when generated motion should continue across anchored segments. |
+| R2V | Motion Context | 22 | References control identity/material while MC supplies cross-segment temporal state. |
+| V2V | Source Bridge | 5, visual MC OFF | The current `<Video 1>` should have the highest motion authority. |
+| RV2V | Source Bridge | 5, visual MC OFF | `<Video 1>` controls motion while Picture refs control subject/appearance. |
+
+Use Motion Context when the next segment should continue the **previously
+generated result**. Use Source Bridge when V2V/RV2V should remain driven by the
+**current original source video**. `22` is a generated-continuation baseline;
+it is not a global recommendation for V2V/RV2V.
 
 ## Motion Context
 
-Recommended settings:
+Generated-continuation baseline for T2V/I2V/FL2V/R2V:
 
 ```text
 Enable Motion Context       true
@@ -147,7 +182,7 @@ Context Frames              22
 Continue Generated Audio    true
 ```
 
-`22` is the recommended context length. Motion Context is taken from the final
+`22` is the baseline context length for these tasks. Motion Context is taken from the final
 output of the previous segment. Generated Audio continuation is used only when
 the timeline is generating audio; it does not run when the timeline uses source
 audio or mute output.
@@ -162,12 +197,55 @@ to connected external I2V/R2V groups. With Motion Context disabled, every
 segment keeps the original independent-media validation and behavior. Export
 mode changes only output packaging and does not affect these inheritance rules.
 
+## Source Bridge (V2V/RV2V)
+
+Recommended starting point:
+
+```text
+Enable Motion Context       false
+Source Bridge Frames        5
+```
+
+The backend field remains `source_overlap_frames` so existing workflows keep
+loading, but Source Bridge v1 accepts only `0` (disabled) or `5` (enabled).
+
+For a boundary at source frame `B`, the Director keeps both normal segment
+generations at their nominal lengths. It then performs one extra five-frame H3
+generation:
+
+```text
+Original source conditioning: B-2, B-1, B, B+1, B+2
+Generated first anchor:       left segment at B-2
+Generated last anchor:        right segment at B+2
+Final replacement frames:     regenerated B-1, B, B+1
+```
+
+The five original frames enter `<Video 1>` only as conditioning. Original
+source pixels are never copied into final output. The normal left/right audio
+cut remains unchanged in Source Bridge v1; there is no Bridge audio or
+crossfade. Total video frame count, FPS and timeline duration remain unchanged.
+Source Bridge v1 improves visual continuity only. Generated-audio continuity
+remains a separate concern.
+
+If the five source frames cross a physical file boundary, an edited timeline
+jump, BOF/EOF, or an RV2V Picture/Audio reference-set change, that boundary is
+reported and keeps its nominal hard cut. Source frames are never padded for a
+Bridge. A selected-segment run also refuses to fabricate a Bridge when an
+adjacent generated cache is missing; generate the complete sequence once or
+generate the missing adjacent segment first.
+
+Even if the Motion Context toggle remains enabled, V2V/RV2V with Source Bridge
+5 skips visual Motion Context. Audio Context behavior is not changed by Source
+Bridge v1.
+
 ## Important Notes
 
 - Do **not** enable the standalone
   [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context)
   in the same ComfyUI environment. Motion Director already contains a modified
   implementation, and both plugins patch the MiniMax H3 runtime.
+- There is no runtime dependency on the standalone Niko repository. Installing
+  both at the same time is not recommended.
 - [AIMixer/ComfyUI_MiniMaxH3_Director](https://github.com/AIMixer/ComfyUI_MiniMaxH3_Director)
   may remain installed. Its node IDs are separate and the two Directors can
   coexist.

@@ -46,8 +46,8 @@ import torch
 
 import comfy.ldm.minimax.model as mm
 
-MC_KEY = "motion_context_index"
-MC_AUDIO_KEY = "motion_context_audio_end_frame"
+from .markers import MC_AUDIO_KEY, MC_KEY
+
 _LOG = logging.getLogger("h3_motion_context")
 
 _orig_init = None

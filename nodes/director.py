@@ -128,14 +128,14 @@ class MiniMaxH3MotionDirector:
                     {
                         "default": 5,
                         "min": 0,
-                        "max": 81,
-                        "step": 1,
+                        "max": 5,
+                        "step": 5,
                         "tooltip": (
-                            "V2V/RV2V only: generate this many extra original-source "
-                            "frames on both sides of each segment boundary, then find "
-                            "the smoothest cut in the common generated region. Visual "
-                            "Motion Context from the previous generation is not used. "
-                            "0 disables Source Overlap."
+                            "V2V/RV2V only. 5 runs an independent H3-native bridge "
+                            "across each eligible boundary: five original source frames "
+                            "are conditioning only, generated frames at B-2/B+2 are "
+                            "anchors, and regenerated B-1/B/B+1 replace the hard cut. "
+                            "Visual Motion Context is skipped. 0 disables Source Bridge."
                         ),
                     },
                 ),

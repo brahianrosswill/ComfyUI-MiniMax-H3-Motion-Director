@@ -1,8 +1,7 @@
 """Guarded MiniMax H3 runtime patches used by Motion Director."""
 
+from .markers import MC_AUDIO_KEY, MC_KEY
 from .h3_layout import (
-    MC_AUDIO_KEY,
-    MC_KEY,
     apply_patch as apply_layout_patch,
     failure_reason as layout_failure_reason,
     is_applied as layout_patch_applied,

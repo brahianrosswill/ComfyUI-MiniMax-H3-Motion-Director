@@ -9,8 +9,88 @@
 
 from __future__ import annotations
 
+import torch
+
+from ..lib.image_prep import fit_canvas
 from ..lib.ref_images import MAX_REFERENCE_IMAGES, REF_IMAGE_KEY_PREFIX, flatten_reference_kwargs
 from ..lib.task_modes import TASK_DESCRIPTIONS, infer_task
+from ..patches.markers import MC_KEY
+
+
+def _encode_source_bridge_anchor(vae, frame, *, width: int, height: int):
+    if not isinstance(frame, torch.Tensor) or frame.ndim != 4 or int(frame.shape[0]) != 1:
+        raise ValueError("Source Bridge anchor must be one IMAGE frame [1,H,W,C].")
+    resized = fit_canvas(frame, int(width), int(height))
+    encoded = vae.encode(resized)
+    if not isinstance(encoded, torch.Tensor) or encoded.ndim != 5:
+        raise ValueError(
+            "Source Bridge video VAE must return [B,C,T,H,W], got %r."
+            % (getattr(encoded, "shape", type(encoded)),)
+        )
+    if int(encoded.shape[2]) != 1:
+        raise ValueError(
+            "Source Bridge single-frame anchor encoded to %d temporal steps; expected 1."
+            % int(encoded.shape[2])
+        )
+    return encoded
+
+
+def append_minimax_keyframe_anchors(
+    conditioning,
+    *,
+    vae,
+    first_frame,
+    last_frame,
+    frame_count: int,
+    width: int,
+    height: int,
+):
+    """Append H3-native first/last anchors after ReferenceToVideo conditioning.
+
+    The official reference node builds ``minimax_refs`` and the target latent
+    first.  This helper then adds two keyframes on the existing H3 layout: frame
+    0 from the left nominal generation and frame 4 from the right generation.
+    """
+    if int(frame_count) != 5:
+        raise ValueError("Source Bridge anchors require exactly 5 target frames.")
+    if not isinstance(conditioning, (list, tuple)) or not conditioning:
+        raise ValueError("Source Bridge positive conditioning is empty.")
+
+    first_latent = _encode_source_bridge_anchor(
+        vae, first_frame, width=width, height=height
+    )
+    last_latent = _encode_source_bridge_anchor(
+        vae, last_frame, width=width, height=height
+    )
+    keyframes = [
+        {
+            "resolved_frame_index": 0,
+            MC_KEY: 0,
+            "latent": first_latent,
+        },
+        {
+            "resolved_frame_index": 0,
+            MC_KEY: 4,
+            "latent": last_latent,
+        },
+    ]
+
+    merged = []
+    for entry in conditioning:
+        if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+            raise ValueError("Source Bridge conditioning entry has an invalid shape.")
+        metadata = dict(entry[1] or {})
+        if metadata.get("minimax_keyframes"):
+            raise ValueError(
+                "Source Bridge conditioning already contains MiniMax keyframes; "
+                "refusing to overwrite them."
+            )
+        # Keep the exact refs payload that the official ReferenceToVideo node
+        # produced; h3_layout.py already supports refs + marked keyframes.
+        metadata["minimax_keyframes"] = [dict(item) for item in keyframes]
+        metadata["minimax_frame_count"] = 5
+        merged.append([entry[0], metadata, *entry[2:]])
+    return merged
 
 
 def _shared_optional_inputs() -> dict:
