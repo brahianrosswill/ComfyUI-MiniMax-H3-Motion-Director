@@ -11,6 +11,11 @@ Director. Its purpose is to help MiniMax H3 carry motion and generated audio
 from one segment into the next, so longer multi-segment videos feel connected
 instead of restarting at every cut.
 
+<img width="629" height="818" alt="螢幕擷取畫面 2026-08-09 090151" src="https://github.com/user-attachments/assets/dbd04567-de62-4aa3-8b7f-bedb0cb8357b" />
+<img width="1808" height="958" alt="螢幕擷取畫面 2026-08-09 090211" src="https://github.com/user-attachments/assets/5fd86776-da77-43bf-9864-6e2ce7f74ed2" />
+<img width="540" height="107" alt="螢幕擷取畫面 2026-08-09 090221" src="https://github.com/user-attachments/assets/6931c473-6920-4b29-a698-0ea65f4db266" />
+
+
 This is an independent, substantially modified derivative and is not an
 official distribution of either upstream project.
 
