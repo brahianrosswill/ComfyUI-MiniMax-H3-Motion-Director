@@ -24,7 +24,7 @@ import torch
 
 import folder_paths
 
-from .frame_align import H3_REFERENCE_VIDEO_PIPELINE
+from .frame_align import H3_REFERENCE_VIDEO_PIPELINE, H3_SOURCE_OVERLAP_PIPELINE
 from .plan import DirectorPlan, SegmentPlan
 
 log = logging.getLogger("ComfyUI-MiniMax-H3-Motion-Director.director.cache")
@@ -79,6 +79,10 @@ def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str,
     }
     if seg.task_key in {"v2v", "rv2v"}:
         fingerprint["reference_video_pipeline"] = H3_REFERENCE_VIDEO_PIPELINE
+        fingerprint["source_overlap_pipeline"] = H3_SOURCE_OVERLAP_PIPELINE
+        fingerprint["source_overlap_frames"] = max(
+            0, int(getattr(plan, "source_overlap_frames", 0))
+        )
     return fingerprint
 
 

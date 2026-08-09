@@ -123,6 +123,21 @@ class MiniMaxH3MotionDirector:
                         ),
                     },
                 ),
+                "source_overlap_frames": (
+                    "INT",
+                    {
+                        "default": 5,
+                        "min": 0,
+                        "max": 81,
+                        "step": 1,
+                        "tooltip": (
+                            "V2V/RV2V only: from Segment 2 onward, prepend up to "
+                            "this many original source-video frames for internal "
+                            "generation, then trim them from the visible output. "
+                            "0 disables Source Overlap."
+                        ),
+                    },
+                ),
                 "audio_context_enabled": (
                     "BOOLEAN",
                     {
@@ -237,6 +252,7 @@ class MiniMaxH3MotionDirector:
         r2v_groups=None,
         motion_context_enabled=True,
         context_length=22,
+        source_overlap_frames=5,
         audio_context_enabled=True,
         steps=25,
         sampler_name="res_multistep",
@@ -286,6 +302,7 @@ class MiniMaxH3MotionDirector:
             external_sigmas=sigmas,
             motion_context_enabled=motion_context_enabled,
             context_length=context_length,
+            source_overlap_frames=source_overlap_frames,
             audio_context_enabled=audio_context_enabled,
             clear_vram_between_segments=clear_vram_between_segments,
         )

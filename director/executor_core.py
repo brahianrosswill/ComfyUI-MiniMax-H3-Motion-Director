@@ -26,6 +26,7 @@ from .core_sampling import (
 )
 from .frame_align import (
     H3_REFERENCE_VIDEO_PIPELINE,
+    H3_SOURCE_OVERLAP_PIPELINE,
     minimax_align_frame_count,
     pad_or_trim_frames,
     prepare_h3_reference_video_clip,
@@ -49,9 +50,11 @@ from .audio_export import (
     resolve_audio_mode,
 )
 from .segment_runtime import (
+    effective_source_overlap_frames,
     frames_label,
     resolve_segment_raw_clip,
     resolve_segment_raw_clip_with_lookahead,
+    resolve_segment_raw_clip_with_source_overlap,
     segment_passthrough_chunk,
     tensor_frame_to_jpeg_b64,
 )
@@ -77,6 +80,21 @@ from .segment_continuity import (
 from .vram_cleanup import cleanup_segment_vram
 
 log = logging.getLogger("ComfyUI-MiniMax-H3-Motion-Director.director.core")
+
+
+def _should_apply_visual_motion_context(
+    motion_enabled: bool,
+    task_key: str,
+    timeline_slot: int,
+    source_overlap_frames: int,
+    explicit_i2v_reset: bool,
+) -> bool:
+    """Whether this segment should consume the previous generated video tail."""
+    if not motion_enabled or int(timeline_slot) <= 0 or explicit_i2v_reset:
+        return False
+    return not (
+        task_key in {"v2v", "rv2v"} and int(source_overlap_frames) > 0
+    )
 
 
 def _stable_cache_value(value, depth: int = 0):
@@ -264,6 +282,7 @@ def execute_director_plan_core(
     external_sigmas=None,
     motion_context_enabled: bool = True,
     context_length: int = 22,
+    source_overlap_frames: int = 5,
     audio_context_enabled: bool = True,
     clear_vram_between_segments: bool = True,
 ) -> tuple[torch.Tensor, list[torch.Tensor], list[dict[str, Any]], str]:
@@ -278,6 +297,8 @@ def execute_director_plan_core(
         )
     motion_enabled = bool(motion_context_enabled)
     requested_context = max(1, int(context_length))
+    requested_source_overlap = max(0, int(source_overlap_frames))
+    plan.source_overlap_frames = requested_source_overlap
     audio_context_requested = bool(audio_context_enabled)
     audio_context_active = bool(
         motion_enabled and audio_context_requested and audio_mode == AUDIO_MODE_GENERATE
@@ -304,6 +325,8 @@ def execute_director_plan_core(
     }
     if any(seg.task_key in {"v2v", "rv2v"} for seg in plan.segments):
         cache_settings["reference_video_pipeline"] = H3_REFERENCE_VIDEO_PIPELINE
+        cache_settings["source_overlap_pipeline"] = H3_SOURCE_OVERLAP_PIPELINE
+        cache_settings["source_overlap_frames"] = requested_source_overlap
     if sampling_mode == "internal":
         cache_settings.update(
             {
@@ -352,6 +375,7 @@ def execute_director_plan_core(
     reports: list[str] = [plan_summary(plan), "", "Execution path: ComfyUI official MiniMax H3"]
     reports.append(f"Motion Context: {'ON' if motion_enabled else 'OFF'}")
     reports.append(f"Context frames: {requested_context}")
+    reports.append(f"Source Overlap frames: {requested_source_overlap} (V2V/RV2V only)")
     reports.append(f"Audio context: {'ON' if audio_context_active else 'OFF'}")
     reports.append(f"Sampling mode: {sampling_mode} (automatic connection detection)")
     if sampling_mode == "internal":
@@ -498,11 +522,32 @@ def execute_director_plan_core(
         else:
             visible_clip_frames = None
 
+        source_overlap_trim = effective_source_overlap_frames(
+            plan, seg, requested_source_overlap
+        )
+        apply_visual_context = _should_apply_visual_motion_context(
+            motion_enabled,
+            seg.task_key,
+            timeline_slot,
+            requested_source_overlap,
+            explicit_i2v_reset,
+        )
+
         reference_clip_frames = None
         if seg.task_key in {"v2v", "rv2v"}:
-            reference_target_frames = minimax_align_frame_count(target_len)
-            requested_lookahead = max(0, reference_target_frames - target_len)
-            if requested_lookahead > 0:
+            reference_base_frames = target_len + source_overlap_trim
+            reference_target_frames = minimax_align_frame_count(reference_base_frames)
+            requested_lookahead = max(
+                0, reference_target_frames - reference_base_frames
+            )
+            if source_overlap_trim > 0:
+                reference_raw = resolve_segment_raw_clip_with_source_overlap(
+                    plan,
+                    seg,
+                    overlap_frames=source_overlap_trim,
+                    end_extra=requested_lookahead,
+                )
+            elif requested_lookahead > 0:
                 reference_raw = resolve_segment_raw_clip_with_lookahead(
                     plan,
                     seg,
@@ -522,7 +567,10 @@ def execute_director_plan_core(
             reference_lookahead = max(
                 0,
                 min(reference_raw_count, reference_target_frames)
-                - min(visible_source_count, target_len),
+                - min(
+                    source_overlap_trim + visible_source_count,
+                    reference_base_frames,
+                ),
             )
             if plan.output_mode == "fixed":
                 reference_clip_frames = fit_canvas(
@@ -538,15 +586,21 @@ def execute_director_plan_core(
             reports.append(
                 f"Segment {timeline_slot + 1} {seg.task_key.upper()}:\n"
                 f"visible source = {visible_source_count} frames\n"
+                f"source overlap = {source_overlap_trim} frames\n"
+                f"combined source = "
+                f"{source_overlap_trim + visible_source_count} frames\n"
                 f"<Video 1> H3 reference = "
                 f"{int(reference_clip_frames.shape[0])} frames\n"
                 f"reference lookahead = {reference_lookahead} frames\n"
-                f"reference tail pad = {reference_tail_pad} frames"
+                f"reference tail pad = {reference_tail_pad} frames\n"
+                f"visual motion context = "
+                f"{'unchanged' if apply_visual_context else ('skipped' if requested_source_overlap > 0 and timeline_slot > 0 else 'off')}\n"
+                f"visible output = {target_len} frames"
             )
 
         context_entry: CachedMotionContext | None = None
         context_span = 0
-        if motion_enabled and timeline_slot > 0 and not explicit_i2v_reset:
+        if apply_visual_context:
             previous_index = timeline_slot - 1
             context_entry = completed_contexts.get(previous_index)
             if context_entry is None:
@@ -581,7 +635,7 @@ def execute_director_plan_core(
                     f"Segment {timeline_slot + 1}: requested {requested_context} "
                     f"context frames, using H3-valid exported tail {context_span}."
                 )
-        generation_request = target_len + context_span
+        generation_request = target_len + context_span + source_overlap_trim
         num_frames = minimax_align_frame_count(generation_request)
         if visible_clip_frames is not None:
             # Motion over-generation belongs to the target timeline, not to a
@@ -773,7 +827,7 @@ def execute_director_plan_core(
         decoded, audio_dict = trim_segment_av(
             decoded,
             audio_dict,
-            head_frames=context_span,
+            head_frames=context_span + source_overlap_trim,
             target_frames=target_len,
             fps=float(plan.frame_rate or 24.0),
         )
@@ -836,7 +890,16 @@ def execute_director_plan_core(
             f"Segment {ui_idx + 1}/{timeline_seg_total}: {task_hint} "
             f"({target_len} frames, seed={seed})"
         )
-        if motion_info is None:
+        if (
+            requested_source_overlap > 0
+            and timeline_slot > 0
+            and seg.task_key in {"v2v", "rv2v"}
+        ):
+            reports.append(
+                f"Segment {ui_idx + 1}: visual Motion Context skipped; "
+                f"continuity source = {source_overlap_trim} original source frames."
+            )
+        elif motion_info is None:
             reports.append(f"Segment {ui_idx + 1}: no previous context")
         else:
             reports.append(

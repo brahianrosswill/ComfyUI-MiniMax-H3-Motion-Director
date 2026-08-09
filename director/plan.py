@@ -134,6 +134,9 @@ class DirectorPlan:
     run_indices: frozenset[int] | None = None  # None = run all segments
     continuity_enabled: bool = False
     continuity_overlap_frames: int = 0
+    # Runtime executor setting. Stored on the plan so segment/context cache
+    # fingerprints cannot reuse outputs from a different source-overlap policy.
+    source_overlap_frames: int = 0
     global_ref_audios: list[SegmentRefAudio] = field(default_factory=list)
 
     @property

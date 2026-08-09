@@ -286,6 +286,7 @@ const DIRECTOR_WIDGET_LABEL_KEYS = {
     seed: "widget.seed",
     motion_context_enabled: "widget.motionContextEnabled",
     context_length: "widget.contextLength",
+    source_overlap_frames: "widget.sourceOverlapFrames",
     audio_context_enabled: "widget.audioContextEnabled",
     steps: "widget.steps",
     sampler_name: "widget.samplerName",
@@ -301,6 +302,7 @@ const DIRECTOR_WIDGET_LABEL_KEYS = {
 const DIRECTOR_WIDGET_TOOLTIP_KEYS = {
     motion_context_enabled: "widget.tooltip.motionContextEnabled",
     context_length: "widget.tooltip.contextLength",
+    source_overlap_frames: "widget.tooltip.sourceOverlapFrames",
     audio_context_enabled: "widget.tooltip.audioContextEnabled",
     clear_vram_between_segments: "widget.tooltip.clearVram",
     export_source_images: "widget.tooltip.exportSourceImages",
