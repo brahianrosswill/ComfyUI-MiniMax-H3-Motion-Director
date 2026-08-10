@@ -94,6 +94,8 @@ import {
     normalizeSourceBridgeValue,
     resolveContinuityUiState,
     restoreDisabledWidgetValue,
+    setNodeInputTooltip,
+    setWidgetTooltip,
     setWidgetVisibility,
     syncDisabledWidgetState,
 } from "./minimax_continuity_ui.mjs";
@@ -311,7 +313,7 @@ const DIRECTOR_WIDGET_LABEL_KEYS = {
 const DIRECTOR_WIDGET_TOOLTIP_KEYS = {
     motion_context_enabled: "widget.tooltip.motionContextEnabled",
     context_length: "widget.tooltip.contextLength",
-    source_overlap_frames: "widget.tooltip.sourceOverlapFrames",
+    source_overlap_frames: "widget.tooltip.sourceBridgeEnabled",
     audio_context_enabled: "widget.tooltip.audioContextEnabled",
     clear_vram_between_segments: "widget.tooltip.clearVram",
     export_source_images: "widget.tooltip.exportSourceImages",
@@ -336,7 +338,7 @@ function applyDirectorWidgetLabels(node) {
             if (w.options) w.options.label = w.label;
         }
         const tipKey = DIRECTOR_WIDGET_TOOLTIP_KEYS[name];
-        if (tipKey && w.options) w.options.tooltip = t(tipKey);
+        if (tipKey) setWidgetTooltip(w, t(tipKey), node);
         const gKey = DIRECTOR_GROUP_LABEL_KEYS[name] || w._mmxGroupI18nKey;
         if (gKey) {
             const label = t(gKey);
@@ -356,6 +358,12 @@ function applyDirectorWidgetLabels(node) {
     }
     refreshSamplingModeUi(node);
     refreshDirectorContinuityUi(node);
+}
+
+function applyDirectorNodeDataTooltips(nodeData) {
+    for (const [name, tipKey] of Object.entries(DIRECTOR_WIDGET_TOOLTIP_KEYS)) {
+        setNodeInputTooltip(nodeData, name, t(tipKey));
+    }
 }
 
 function drawContinuityToggle(ctx, width, y, label, checked, enabled) {
@@ -456,18 +464,26 @@ function setContinuityWidgetEnabled(widget, enabled) {
 function captureContinuityRenderer(widget) {
     if (!widget || widget._mmxContinuityRendererSnapshot) return;
     widget._mmxContinuityRendererSnapshot = {
+        type: widget.type,
         draw: widget.draw,
         mouse: widget.mouse,
+        onClick: widget.onClick,
+        onPointerDown: widget.onPointerDown,
     };
 }
 
 function restoreContinuityRenderer(widget) {
     if (!widget?._mmxContinuityRendererSnapshot) return;
     const snapshot = widget._mmxContinuityRendererSnapshot;
+    widget.type = snapshot.type;
     if (snapshot.draw === undefined) delete widget.draw;
     else widget.draw = snapshot.draw;
     if (snapshot.mouse === undefined) delete widget.mouse;
     else widget.mouse = snapshot.mouse;
+    if (snapshot.onClick === undefined) delete widget.onClick;
+    else widget.onClick = snapshot.onClick;
+    if (snapshot.onPointerDown === undefined) delete widget.onPointerDown;
+    else widget.onPointerDown = snapshot.onPointerDown;
 }
 
 function continuityStrategyLabel(strategy) {
@@ -519,9 +535,77 @@ function openContinuityStrategyMenu(event, pos, node) {
         });
         return;
     }
-    const current = node._mmxContinuityUiState?.videoStrategy;
-    const next = strategies[(Math.max(0, strategies.indexOf(current)) + 1) % strategies.length];
-    applyVideoContinuityStrategy(node, next, [app.canvas, node, pos, event]);
+
+    const root = document.createElement("div");
+    root.className = "litegraph litecontextmenu litemenubar-panel dark";
+    root.setAttribute("role", "menu");
+    root.style.position = "fixed";
+    root.style.zIndex = "100000";
+    root.style.minWidth = "150px";
+
+    let closed = false;
+    const close = () => {
+        if (closed) return;
+        closed = true;
+        document.removeEventListener("pointerdown", closeOnOutside, true);
+        document.removeEventListener("keydown", closeOnEscape, true);
+        root.remove();
+    };
+    const closeOnOutside = (outsideEvent) => {
+        if (!root.contains(outsideEvent.target)) close();
+    };
+    const closeOnEscape = (keyEvent) => {
+        if (keyEvent.key === "Escape") close();
+    };
+
+    strategies.forEach((strategy, index) => {
+        const item = document.createElement("div");
+        item.className = "litemenu-entry submenu";
+        item.setAttribute("role", "menuitem");
+        item.tabIndex = index === 0 ? 0 : -1;
+        item.textContent = labels[index];
+        item.addEventListener("pointerdown", (itemEvent) => {
+            itemEvent.preventDefault();
+            itemEvent.stopPropagation();
+        });
+        item.addEventListener("click", (itemEvent) => {
+            itemEvent.preventDefault();
+            itemEvent.stopPropagation();
+            select(strategy);
+            close();
+        });
+        item.addEventListener("keydown", (keyEvent) => {
+            if (keyEvent.key === "Enter" || keyEvent.key === " ") {
+                keyEvent.preventDefault();
+                select(strategy);
+                close();
+            }
+        });
+        root.append(item);
+    });
+
+    document.body.append(root);
+    const bounds = root.getBoundingClientRect();
+    const left = Math.max(4, Math.min(event.clientX - 10, window.innerWidth - bounds.width - 4));
+    const top = Math.max(4, Math.min(event.clientY - 10, window.innerHeight - bounds.height - 4));
+    root.style.left = `${left}px`;
+    root.style.top = `${top}px`;
+    root.querySelector('[role="menuitem"]')?.focus();
+    document.addEventListener("pointerdown", closeOnOutside, true);
+    document.addEventListener("keydown", closeOnEscape, true);
+}
+
+function installContinuityPointerClick(widget, handler) {
+    widget.onPointerDown = function (pointer, pointerNode, canvas) {
+        const downEvent = pointer.eDown;
+        pointer.onClick = (upEvent) => handler(
+            upEvent || downEvent,
+            canvas?.graph_mouse || [0, 0],
+            pointerNode,
+            canvas,
+        );
+        return true;
+    };
 }
 
 function scheduleContinuityNodeResize(node, editor) {
@@ -607,8 +691,9 @@ function refreshDirectorContinuityUi(node, editor = node?._minimaxEditor) {
     source.options = source.options || {};
 
     if (state.showVisualContinuitySelector) {
+        motion.type = "custom";
         motion.label = t("widget.visualContinuity");
-        motion.options.tooltip = t("widget.tooltip.visualContinuity");
+        setWidgetTooltip(motion, t("widget.tooltip.visualContinuity"), node);
         motion.draw = function (ctx, drawNode, width, y) {
             this._mmxContinuitySelectorBounds = drawContinuityValueRow(
                 ctx,
@@ -626,18 +711,25 @@ function refreshDirectorContinuityUi(node, editor = node?._minimaxEditor) {
             openContinuityStrategyMenu(event, pos, mouseNode);
             return true;
         };
+        motion.onClick = function ({ e, node: clickNode, canvas }) {
+            const pos = canvas?.graph_mouse || [0, 0];
+            openContinuityStrategyMenu(e, pos, clickNode);
+        };
+        installContinuityPointerClick(motion, (event, pos, clickNode) => {
+            openContinuityStrategyMenu(event, pos, clickNode);
+        });
     } else {
         motion.label = t("widget.motionContextEnabled");
-        motion.options.tooltip = t("widget.tooltip.motionContextEnabled");
+        setWidgetTooltip(motion, t("widget.tooltip.motionContextEnabled"), node);
     }
 
     context.label = t("widget.contextLength");
-    context.options.tooltip = t("widget.tooltip.contextLength");
-    source.options.tooltip = t("widget.tooltip.sourceBridgeEnabled");
+    setWidgetTooltip(context, t("widget.tooltip.contextLength"), node);
+    setWidgetTooltip(source, t("widget.tooltip.sourceBridgeEnabled"), node);
 
     if (state.showBridgeLength) {
-        audio.tooltip = t("widget.tooltip.sourceBridgeEnabled");
-        audio.options.tooltip = t("widget.tooltip.sourceBridgeEnabled");
+        audio.type = "custom";
+        setWidgetTooltip(audio, t("widget.tooltip.sourceBridgeEnabled"), node);
         audio.draw = function (ctx, drawNode, width, y) {
             drawContinuityValueRow(
                 ctx,
@@ -648,17 +740,20 @@ function refreshDirectorContinuityUi(node, editor = node?._minimaxEditor) {
             );
         };
         audio.mouse = (event) => event.type === "pointerdown" || event.type === "mousedown";
+        audio.onClick = () => {};
+        installContinuityPointerClick(audio, () => {});
     } else if (state.showAudioContinuation && !state.audioContextControlEnabled) {
-        audio.tooltip = t("widget.tooltip.audioContextEnabled");
-        audio.options.tooltip = t("widget.tooltip.audioContextEnabled");
+        audio.type = "custom";
+        setWidgetTooltip(audio, t("widget.tooltip.audioContextEnabled"), node);
         audio.draw = function (ctx, drawNode, width, y) {
             drawContinuityToggle(ctx, width, y, t("widget.audioContextEnabled"), false, false);
         };
         audio.mouse = () => true;
+        audio.onClick = () => {};
+        installContinuityPointerClick(audio, () => {});
     } else {
         audio.label = t("widget.audioContextEnabled");
-        audio.tooltip = t("widget.tooltip.audioContextEnabled");
-        audio.options.tooltip = t("widget.tooltip.audioContextEnabled");
+        setWidgetTooltip(audio, t("widget.tooltip.audioContextEnabled"), node);
     }
 
     const group = node.widgets?.find((w) => w.name === "bd_grp_motion");
@@ -9537,6 +9632,10 @@ app.registerExtension({
         }
 
         if (!isDirectorNodeDef(nodeType, nodeData)) return;
+
+        // Current Vue-node tooltips are built from the registered node definition.
+        // Replace backend-length help before ComfyUI copies that definition into its store.
+        applyDirectorNodeDataTooltips(nodeData);
 
         const onCreated = nodeType.prototype.onNodeCreated;
         nodeType.prototype.onNodeCreated = function () {

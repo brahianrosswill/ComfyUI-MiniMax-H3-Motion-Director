@@ -9,6 +9,8 @@ import {
     notifyWidgetValueChange,
     resolveContinuityUiState,
     restoreDisabledWidgetValue,
+    setNodeInputTooltip,
+    setWidgetTooltip,
     setWidgetVisibility,
     syncDisabledWidgetState,
     videoStrategyBackendPatch,
@@ -178,6 +180,39 @@ test("hidden widgets consume zero height and restore their original size", () =>
     assert.equal(widget.hidden, false);
     assert.equal(widget.options.hidden, false);
     assert.equal(widget.element.style.display, "");
+});
+
+test("continuity tooltip updates both legacy widget and current options surfaces", () => {
+    const requiredSpec = ["BOOLEAN", { tooltip: "old" }];
+    const widget = {
+        name: "motion_context_enabled",
+        tooltip: "old",
+        options: { tooltip: "old" },
+        inputData: ["BOOLEAN", { tooltip: "old" }],
+    };
+    const node = {
+        constructor: {
+            nodeData: {
+                input: { required: { motion_context_enabled: requiredSpec } },
+            },
+        },
+    };
+    setWidgetTooltip(widget, "short", node);
+    assert.equal(widget.tooltip, "short");
+    assert.equal(widget.options.tooltip, "short");
+    assert.equal(widget.inputData[1].tooltip, "short");
+    assert.equal(requiredSpec[1].tooltip, "short");
+});
+
+test("continuity tooltip can be shortened before the node definition is registered", () => {
+    const requiredSpec = ["INT", { tooltip: "backend long help" }];
+    const nodeData = {
+        input: { required: { context_length: requiredSpec } },
+        inputs: [{ name: "context_length", tooltip: "v3 long help" }],
+    };
+    setNodeInputTooltip(nodeData, "context_length", "short");
+    assert.equal(requiredSpec[1].tooltip, "short");
+    assert.equal(nodeData.inputs[0].tooltip, "short");
 });
 
 test("disabled widget snapshot follows workflow values loaded after node creation", () => {

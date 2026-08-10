@@ -59,6 +59,39 @@ export function setWidgetVisibility(widget, visible) {
     }
 }
 
+function setInputSpecTooltip(spec, tooltip) {
+    if (!spec) return;
+    if (Array.isArray(spec)) {
+        if (spec[1] && typeof spec[1] === "object") spec[1].tooltip = tooltip;
+        return;
+    }
+    if (typeof spec === "object") spec.tooltip = tooltip;
+}
+
+export function setNodeInputTooltip(nodeData, inputName, tooltip) {
+    if (!nodeData || !inputName) return;
+    const input = nodeData.input;
+    for (const section of [input?.required, input?.optional, input?.hidden]) {
+        setInputSpecTooltip(section?.[inputName], tooltip);
+    }
+    if (Array.isArray(nodeData.inputs)) {
+        const spec = nodeData.inputs.find((entry) => entry?.name === inputName);
+        setInputSpecTooltip(spec, tooltip);
+    }
+}
+
+export function setWidgetTooltip(widget, tooltip, node) {
+    if (!widget) return;
+    widget.options = widget.options || {};
+    widget.tooltip = tooltip;
+    widget.options.tooltip = tooltip;
+    setInputSpecTooltip(widget.inputData, tooltip);
+    setInputSpecTooltip(widget.input_data, tooltip);
+
+    const nodeData = node?.constructor?.nodeData || node?.nodeData;
+    setNodeInputTooltip(nodeData, widget.name, tooltip);
+}
+
 export function syncDisabledWidgetState(widget, enabled) {
     if (!widget) return;
     if (!enabled) widget._mmxContinuityStoredValue = widget.value;
