@@ -146,11 +146,47 @@ test("Motion Context OFF keeps dependent controls visible but disabled for gener
     assert.equal(actual.audioContextControlEnabled, false);
 });
 
-test("Continue Generated Audio is disabled outside generated-audio output mode", () => {
-    assert.equal(state({ audioMode: "generate" }).audioContextControlEnabled, true);
-    assert.equal(state({ audioMode: "source" }).audioContextControlEnabled, false);
-    assert.equal(state({ audioMode: "mute" }).audioContextControlEnabled, false);
+for (const taskKey of ["t2v", "i2v", "r2v", "fl2v"]) {
+    test(`${taskKey.toUpperCase()} generated-audio continuation ignores hidden audio mode`, () => {
+        for (const audioMode of ["generate", "source", "mute"]) {
+            const actual = state({ taskKey, motionContextEnabled: true, audioMode });
+            assert.equal(actual.showAudioContinuation, true);
+            assert.equal(actual.audioContextControlEnabled, true);
+        }
+    });
+}
+
+test("I2V Motion Context OFF disables generated-audio continuation", () => {
+    const actual = state({
+        taskKey: "i2v",
+        motionContextEnabled: false,
+        audioMode: "mute",
+    });
+    assert.equal(actual.showAudioContinuation, true);
+    assert.equal(actual.audioContextControlEnabled, false);
 });
+
+for (const taskKey of ["v2v", "rv2v"]) {
+    test(`${taskKey.toUpperCase()} Motion Context audio continuation respects edit audio mode`, () => {
+        const base = {
+            taskKey,
+            sourceBridgeValue: 0,
+            motionContextEnabled: true,
+        };
+        assert.equal(
+            state({ ...base, audioMode: "generate" }).audioContextControlEnabled,
+            true,
+        );
+        assert.equal(
+            state({ ...base, audioMode: "source" }).audioContextControlEnabled,
+            false,
+        );
+        assert.equal(
+            state({ ...base, audioMode: "mute" }).audioContextControlEnabled,
+            false,
+        );
+    });
+}
 
 test("unrelated tasks expose no continuity controls", () => {
     const actual = state({ taskKey: "t2i", sourceBridgeValue: 5 });

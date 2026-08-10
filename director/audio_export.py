@@ -39,10 +39,15 @@ def task_passes_source_audio(task_key: str) -> bool:
 
 
 def resolve_audio_mode(plan) -> str:
-    """Return generate | source | mute from timeline.output.audioMode.
+    """Return the task-aware generate | source | mute output mode.
 
-    ``source`` is only honored for v2v/rv2v; other tasks treat it as generate.
+    Only v2v/rv2v expose audio-mode selection. Generated AV tasks always use
+    model-generated audio, regardless of stale timeline workspace values.
     """
+    task_key = str(getattr(plan, "global_task_key", "") or "").strip().lower()
+    if task_key not in VIDEO_EDIT_AUDIO_TASKS:
+        return AUDIO_MODE_GENERATE
+
     out = (getattr(plan, "raw", None) or {}).get("output") or {}
     raw = str(out.get("audioMode") or out.get("audio_mode") or AUDIO_MODE_GENERATE).strip().lower()
     aliases = {
@@ -56,11 +61,7 @@ def resolve_audio_mode(plan) -> str:
         "silent": AUDIO_MODE_MUTE,
         "silence": AUDIO_MODE_MUTE,
     }
-    mode = aliases.get(raw, AUDIO_MODE_GENERATE)
-    task_key = str(getattr(plan, "global_task_key", "") or "")
-    if mode == AUDIO_MODE_SOURCE and task_key not in VIDEO_EDIT_AUDIO_TASKS:
-        return AUDIO_MODE_GENERATE
-    return mode
+    return aliases.get(raw, AUDIO_MODE_GENERATE)
 
 
 def empty_audio_dict(sample_rate: int = SILENT_SAMPLE_RATE) -> dict[str, Any]:

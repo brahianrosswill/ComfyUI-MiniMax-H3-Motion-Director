@@ -172,6 +172,10 @@ export function resolveContinuityUiState({
     const motionActive = (generatedMotionUi && motionOn) || videoMotionUi;
     const showContextFrames = generatedMotionUi || videoMotionUi;
     const showAudioContinuation = generatedMotionUi || videoMotionUi;
+    const generatedAudioContinuationActive = generatedMotionUi && motionActive;
+    const videoEditAudioContinuationActive = videoMotionUi
+        && motionActive
+        && String(audioMode || "generate").toLowerCase() === "generate";
 
     return {
         taskKey: task,
@@ -189,7 +193,7 @@ export function resolveContinuityUiState({
             && videoStrategy === VIDEO_CONTINUITY_STRATEGIES.SOURCE_BRIDGE,
         motionContextControlEnabled: generatedMotionUi,
         contextFramesControlEnabled: motionActive,
-        audioContextControlEnabled: motionActive
-            && String(audioMode || "generate").toLowerCase() === "generate",
+        audioContextControlEnabled: generatedAudioContinuationActive
+            || videoEditAudioContinuationActive,
     };
 }

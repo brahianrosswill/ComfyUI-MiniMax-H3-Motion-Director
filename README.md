@@ -185,8 +185,10 @@ shows only controls that can affect the current task:
   Motion Context toggle.
 - **Off** shows only the selector and disables both visual continuity paths.
 - Context Frames and Continue Generated Audio are disabled when Motion Context
-  is off. Continue Generated Audio is also disabled unless output audio mode is
-  **Generate audio**.
+  is off. For T2V/I2V/R2V/FL2V, enabling Motion Context enables generated-audio
+  continuation directly; hidden `timeline.output.audioMode` values do not gate
+  these generated AV tasks. For V2V/RV2V Motion Context, the audio control is
+  available only when model-generated audio is selected.
 
 The V2V/RV2V selector keeps the existing backend schema: Source Bridge maps to
 `source_overlap_frames=5`; Motion Context maps to
@@ -207,15 +209,31 @@ Continue Generated Audio    true
 ```
 
 `22` is the baseline context length for these tasks. Motion Context is taken from the final
-output of the previous segment. Generated Audio continuation is used only when
-the timeline is generating audio; it does not run when the timeline uses source
-audio or mute output.
+output of the previous segment. MiniMax H3 generates audio together with video
+for T2V/I2V/R2V/FL2V; these tasks do not expose Source/Mute audio-mode
+selection. With multiple segments and Motion Context enabled, Continue
+Generated Audio can be enabled directly and is not gated by
+`timeline.output.audioMode`.
+
+I2V three-segment example:
+
+```text
+Motion Context              ON
+Context Frames              22
+Continue Generated Audio    ON
+```
+
+Each I2V segment generates MiniMax H3 audio. Continue Generated Audio passes
+generated audio context across segment boundaries; it does not turn audio
+generation on or off.
 
 For V2V/RV2V, choose **Visual Continuity: Motion Context** to use the same
 fallback path. Context Frames and Continue Generated Audio then appear; the
 separate Motion Context toggle stays hidden because the strategy selector has
 already enabled it. Motion Context 1 is the current seam-smoothness fallback,
-while 22 is not the recommended V2V/RV2V default.
+while 22 is not the recommended V2V/RV2V default. V2V/RV2V retain their real
+generated/source/mute output semantics, so generated-audio continuation is
+available only when model-generated audio is selected.
 
 For I2V with Motion Context enabled, Segment 1 needs an initial image; later
 segments may leave the image slot empty to continue from the preceding Motion
