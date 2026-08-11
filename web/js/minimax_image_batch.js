@@ -1789,25 +1789,17 @@ export function renderImageBatchGroups(editor) {
         if (isR2v) appendCommonSelection(card, editor, seg, index);
 
         if (key === "i2v") {
-            const hasExplicitMaterial = key === "i2v"
-                ? hasI2vSource(seg)
-                : hasR2vMaterial(seg);
+            const hasExplicitMaterial = hasI2vSource(seg);
             let statusKey = "";
             let required = false;
             if (!hasExplicitMaterial && !motionOn) {
-                statusKey = key === "i2v"
-                    ? "batch.material.i2vMissing"
-                    : "batch.material.r2vMissing";
+                statusKey = "batch.material.i2vMissing";
                 required = true;
             } else if (!hasExplicitMaterial && index === 0) {
-                statusKey = key === "i2v"
-                    ? "batch.material.i2vRequired"
-                    : "batch.material.r2vRequired";
+                statusKey = "batch.material.i2vRequired";
                 required = true;
             } else if (!hasExplicitMaterial && index > 0) {
-                statusKey = key === "i2v"
-                    ? "batch.material.i2vContinuation"
-                    : "batch.material.r2vInherited";
+                statusKey = "batch.material.i2vContinuation";
             }
             if (statusKey) {
                 const status = document.createElement("div");
