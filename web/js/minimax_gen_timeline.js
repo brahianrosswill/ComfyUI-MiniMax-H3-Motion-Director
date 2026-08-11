@@ -175,7 +175,7 @@ export const FL2V_TASKS = new Set(["fl2v"]);
 /** Blank-canvas / subject-ref batch generation (not source-video editing). */
 export const VIDEO_BATCH_TASKS = new Set(["t2v", "i2v", "r2v"]);
 export const PROMPT_BATCH_TASKS = new Set([...VIDEO_BATCH_TASKS, ...FL2V_TASKS]);
-/** Tasks that never use source-video upload toolbar. v2v/rv2v use Bernini-style video timeline. */
+/** Tasks that never use the source-video toolbar; v2v/rv2v use the H3 video timeline. */
 export const NO_VIDEO_UPLOAD_TASKS = new Set(["t2v", "i2v", "r2v"]);
 
 export function resolveTaskKey(taskTypeValue) {
@@ -208,7 +208,7 @@ export function getDirectorMode(taskTypeValue) {
     const key = resolveTaskKey(taskTypeValue);
     if (FL2V_TASKS.has(key)) return "fl2v";
     if (PROMPT_BATCH_TASKS.has(key)) return "prompt_batch";
-    // v2v / rv2v (and any non-batch key) → source-video timeline, same as Bernini.
+    // v2v / rv2v (and any non-batch key) → MiniMax H3 source-video timeline.
     return "video";
 }
 
@@ -271,7 +271,7 @@ const NO_REF_IMAGE_TASKS = new Set(["v2v", "mv2v", "ads2v", "t2v", "i2v", "fl2v"
 
 export function taskUsesReferenceImages(taskKey) {
     if (NO_REF_IMAGE_TASKS.has(taskKey)) return false;
-    // r2v batch + legacy Bernini-style ref edit keys.
+    // r2v batch + legacy reference-edit task keys.
     return taskKey === "r2v" || taskKey === "r2i" || taskKey === "rv2v" || taskKey === "vrc2v" || taskKey === "vi2v";
 }
 

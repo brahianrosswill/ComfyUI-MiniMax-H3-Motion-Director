@@ -5,7 +5,7 @@
 # This derivative project is distributed under GPL-3.0.
 # See NOTICE and LICENSES/Apache-2.0-AIMixer.txt.
 
-"""LLM prompt enhancement for Bernini task types (Ollama / Zhipu)."""
+"""LLM prompt enhancement for MiniMax H3 task types (Ollama / Zhipu)."""
 
 from __future__ import annotations
 
@@ -60,8 +60,19 @@ DEFAULT_API_FORMAT = API_FORMAT_OLLAMA
 OPENAI_COMPAT_MODE_STANDARD = "标准"
 OPENAI_COMPAT_MODE_LLAMA_SWAP = "llama-swap"
 DEFAULT_OPENAI_COMPAT_MODE = OPENAI_COMPAT_MODE_STANDARD
-DEFAULT_OLLAMA_NUM_CTX = int(os.environ.get("BERNINI_PE_OLLAMA_NUM_CTX", "32768"))
-MAX_OLLAMA_VISION_IMAGES = int(os.environ.get("BERNINI_PE_OLLAMA_MAX_VISION", "4"))
+# Prefer current MiniMax H3 names while retaining legacy fallbacks for existing setups.
+DEFAULT_OLLAMA_NUM_CTX = int(
+    os.environ.get(
+        "MINIMAX_H3_PE_OLLAMA_NUM_CTX",
+        os.environ.get("BERNINI_PE_OLLAMA_NUM_CTX", "32768"),
+    )
+)
+MAX_OLLAMA_VISION_IMAGES = int(
+    os.environ.get(
+        "MINIMAX_H3_PE_OLLAMA_MAX_VISION",
+        os.environ.get("BERNINI_PE_OLLAMA_MAX_VISION", "4"),
+    )
+)
 
 ZHIPU_FALLBACK_MODELS = [
     "glm-4.6v-flash",
@@ -841,7 +852,7 @@ def enhance_prompt_sync(
                 return None, (
                     f"{last[1]} "
                     f"（已自动放大 num_ctx 并压缩 Vision 图片仍不足；"
-                    f"可设环境变量 BERNINI_PE_OLLAMA_NUM_CTX=65536，"
+                    f"可设环境变量 MINIMAX_H3_PE_OLLAMA_NUM_CTX=65536，"
                     f"或减少参考图/源视频帧，或换更小 Vision 模型）"
                 )
             return last

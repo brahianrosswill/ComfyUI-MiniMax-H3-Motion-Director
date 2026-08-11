@@ -130,7 +130,7 @@ def _normalize_shots(raw_shots: list | None, *, frame_rate: float = 24.0) -> lis
 
 # Hard locks for every fl2v shot (re-applied after PE). Community cue words:
 # MiniMax H3 locks first/last via MiniMaxH3ImageToVideo keyframe latents.
-# Prompt text reinforces continuity; avoid Bernini image0/image1 tokens.
+# Prompt text reinforces continuity; avoid MiniMax H3 reference-slot tokens.
 FLF_PROMPT_PREFIX = (
     "完全保持首尾帧。"
     "视频第一帧必须与给定首帧画面一致，最后一帧必须与给定尾帧画面一致；"
@@ -303,7 +303,7 @@ def _build_fl2v_endpoint_source(
     end_img: torch.Tensor | None,
     frame_count: int,
 ) -> torch.Tensor:
-    """Build source video with temporal endpoints for Bernini context encoding.
+    """Build a source video with temporal endpoints for MiniMax H3 encoding.
 
     Prompt/refs alone are soft. Encoding a full-length source whose first frame is
     image0 and last frame is image1 (middle held at image0) gives the model a much

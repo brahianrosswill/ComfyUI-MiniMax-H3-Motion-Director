@@ -5,7 +5,7 @@
 # This derivative project is distributed under GPL-3.0.
 # See NOTICE and LICENSES/Apache-2.0-AIMixer.txt.
 
-"""Image and video preprocessing for Bernini semantic context streams."""
+"""Image and video preprocessing for MiniMax H3 visual conditioning."""
 
 from __future__ import annotations
 
@@ -80,7 +80,7 @@ def preflight_h3_visual_conditioning(
 
 
 def fit_long_edge(image: torch.Tensor, max_edge: int, stride: int = 16) -> torch.Tensor:
-    """Match ComfyUI ``nodes_bernini._resize_long_edge``: long edge <= max, snap to stride."""
+    """Match official ComfyUI H3 long-edge resizing and snap to the requested stride."""
     rgb = image[:, :, :, :3]
     height, width = rgb.shape[1], rgb.shape[2]
     scale = min(max_edge / max(height, width), 1.0)

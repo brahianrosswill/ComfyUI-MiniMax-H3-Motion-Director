@@ -10,6 +10,7 @@ from conftest import PACKAGE
 
 
 color = importlib.import_module(f"{PACKAGE}.director.color_reanchor")
+segment_cache = importlib.import_module(f"{PACKAGE}.director.segment_cache")
 
 
 def _anchor() -> torch.Tensor:
@@ -155,3 +156,60 @@ def test_color_reanchor_cache_settings_distinguish_off_and_on():
     assert off["color_reanchor_enabled"] is False
     assert on["color_reanchor_enabled"] is True
     assert on["color_reanchor_pipeline"] == "color_reanchor_v1"
+
+
+def test_segment_cache_fingerprint_tracks_i2v_and_r2v_color_anchor_content():
+    plan = SimpleNamespace(
+        width=640,
+        height=864,
+        output_mode="fixed",
+        ref_max_size=864,
+        continuity_enabled=False,
+        continuity_overlap_frames=0,
+        color_reanchor_enabled=True,
+        spatial_stride=32,
+        source_overlap_frames=0,
+    )
+    common = dict(
+        index=0,
+        start_frame=0,
+        end_frame=22,
+        prompt="test",
+        negative_prompt="",
+        ref_audios=[],
+        ref_videos=[],
+        reference_video_meta={},
+        reference_video_start_frame=0,
+    )
+
+    i2v_a = SimpleNamespace(
+        **common,
+        task_key="i2v",
+        source_clip=torch.full((1, 2, 2, 3), 0.2),
+        refs=[],
+    )
+    i2v_b = SimpleNamespace(
+        **common,
+        task_key="i2v",
+        source_clip=torch.full((1, 2, 2, 3), 0.8),
+        refs=[],
+    )
+    assert segment_cache.segment_cache_fingerprint(
+        i2v_a, plan
+    ) != segment_cache.segment_cache_fingerprint(i2v_b, plan)
+
+    r2v_a = SimpleNamespace(
+        **common,
+        task_key="r2v",
+        source_clip=None,
+        refs=[SimpleNamespace(index=0, tensor=torch.full((1, 2, 2, 3), 0.2))],
+    )
+    r2v_b = SimpleNamespace(
+        **common,
+        task_key="r2v",
+        source_clip=None,
+        refs=[SimpleNamespace(index=0, tensor=torch.full((1, 2, 2, 3), 0.8))],
+    )
+    assert segment_cache.segment_cache_fingerprint(
+        r2v_a, plan
+    ) != segment_cache.segment_cache_fingerprint(r2v_b, plan)

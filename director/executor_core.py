@@ -224,7 +224,7 @@ def _build_minimax_inputs(
         ref_audios = ref_audios_to_dict(getattr(seg, "ref_audios", None) or [])
         ref_video_audios = _ref_video_audios_to_dict(getattr(seg, "ref_video_audios", None) or [])
     elif task_key in {"v2v", "rv2v"}:
-        # Bernini-style video edit: each timeline segment's source clip → <Video 1>.
+        # MiniMax H3 video edit: each timeline segment's source clip → <Video 1>.
         # rv2v additionally injects 图片1–9 / 音频1–3 as <Picture N> / <Audio J>.
         if clip_frames is None or clip_frames.shape[0] <= 0:
             raise ValueError(

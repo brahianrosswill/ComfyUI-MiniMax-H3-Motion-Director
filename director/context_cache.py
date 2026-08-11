@@ -13,6 +13,7 @@ import torch
 
 import folder_paths
 
+from ..lib.tensor_fingerprint import tensor_fingerprint
 from .audio_trim import audio_has_samples
 from .segment_cache import _write_via_temp
 
@@ -53,34 +54,6 @@ def _json_identity(value: Any, depth: int = 0):
     if isinstance(value, (list, tuple)):
         return [_json_identity(item, depth + 1) for item in value]
     return {"type": f"{type(value).__module__}.{type(value).__qualname__}"}
-
-
-def tensor_fingerprint(tensor: torch.Tensor | None, *, samples: int = 8192) -> dict[str, Any] | None:
-    """Cheap but content-sensitive identity for in-memory timeline media."""
-    if not isinstance(tensor, torch.Tensor):
-        return None
-    t = tensor.detach().cpu().contiguous()
-    flat = t.reshape(-1)
-    count = int(flat.numel())
-    if count <= samples:
-        probe = flat
-    else:
-        idx = torch.linspace(0, count - 1, steps=samples, dtype=torch.float64).long()
-        probe = flat.index_select(0, idx)
-    # NumPy cannot serialize every Torch dtype (notably bfloat16). Keep the
-    # original dtype in metadata, but normalize floating samples to float32 for
-    # a stable byte digest.
-    probe_for_hash = probe.float() if probe.is_floating_point() else probe
-    probe_bytes = probe_for_hash.numpy().tobytes()
-    digest = hashlib.sha256(probe_bytes).hexdigest()
-    return {
-        "shape": list(t.shape),
-        "dtype": str(t.dtype),
-        "numel": count,
-        "probe_sha256": digest,
-        "mean": float(flat.double().mean().item()) if count else 0.0,
-        "square_mean": float((flat.double() ** 2).mean().item()) if count else 0.0,
-    }
 
 
 def _audio_identity(item) -> dict[str, Any]:

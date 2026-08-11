@@ -693,9 +693,9 @@ def slice_video_frames(source: torch.Tensor, start: int, end: int) -> torch.Tens
 def prepare_segment_clip(clip: torch.Tensor, target_frames: int) -> tuple[torch.Tensor, int]:
     """Trim source toward MiniMax 17k+5 length. Do **not** pad with last-frame copies.
 
-    Fabricating freeze frames in the source makes Bernini/Wan reproduce visible
-    stutter / duplicate frames. Official BerniniConditioning simply encodes
-    ``source[:length]`` even when the clip is shorter than ``length``.
+    Fabricating freeze frames in the source can reproduce visible stutter or
+    duplicate motion. MiniMax H3 reference conditioning encodes only the real
+    ``source[:length]`` frames when the clip is shorter than ``length``.
     """
     actual = clip.shape[0]
     if actual <= 0:

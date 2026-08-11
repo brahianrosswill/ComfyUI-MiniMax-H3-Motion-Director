@@ -31,9 +31,25 @@ from ..lib.prompt_enhance_templates import (
 
 log = logging.getLogger("ComfyUI-MiniMax-H3-Motion-Director.director")
 
-LLM_VISION_MAX_SIDE = int(os.environ.get("BERNINI_PE_VISION_MAX_SIDE", "512"))
-LLM_VISION_JPEG_QUALITY = int(os.environ.get("BERNINI_PE_VISION_JPEG_QUALITY", "65"))
-LLM_VISION_MAX_IMAGES = int(os.environ.get("BERNINI_PE_VISION_MAX_IMAGES", "4"))
+# Prefer current MiniMax H3 names while retaining legacy fallbacks for existing setups.
+LLM_VISION_MAX_SIDE = int(
+    os.environ.get(
+        "MINIMAX_H3_PE_VISION_MAX_SIDE",
+        os.environ.get("BERNINI_PE_VISION_MAX_SIDE", "512"),
+    )
+)
+LLM_VISION_JPEG_QUALITY = int(
+    os.environ.get(
+        "MINIMAX_H3_PE_VISION_JPEG_QUALITY",
+        os.environ.get("BERNINI_PE_VISION_JPEG_QUALITY", "65"),
+    )
+)
+LLM_VISION_MAX_IMAGES = int(
+    os.environ.get(
+        "MINIMAX_H3_PE_VISION_MAX_IMAGES",
+        os.environ.get("BERNINI_PE_VISION_MAX_IMAGES", "4"),
+    )
+)
 
 
 def downscale_b64_jpeg(
@@ -122,7 +138,7 @@ def sample_video_tensor_frames(clip: torch.Tensor | None, *, max_frames: int = 3
 
 
 def parse_user_reference_slots(text: str) -> list[int]:
-    """Extract Bernini image0–image4 indices from @imageN or imageN in user prompt."""
+    """Extract MiniMax H3 image0–image4 indices from @imageN or imageN."""
     body = text or ""
     indices: list[int] = []
     for match in re.finditer(r"@image(\d)(?!\d)", body, re.IGNORECASE):
@@ -461,7 +477,7 @@ def build_vision_slot_preamble(
     ref_images_first: bool = False,
     output_language: str = OUTPUT_LANGUAGE_EN,
 ) -> str:
-    """Explain vision attachment order vs Bernini image0–4 slots for the LLM."""
+    """Explain vision attachment order vs MiniMax H3 image0–4 slots for the LLM."""
     ref_slots = list(ref_slots or [])
     if source_count <= 0 and not ref_slots and ref_video_count <= 0:
         return ""
@@ -543,7 +559,7 @@ def build_vision_slot_preamble(
 
 
 def refs_tensors_to_b64_with_slots(refs) -> tuple[list[str], list[int]]:
-    """Return (b64_list, bernini_slot_indices) sorted by slot index."""
+    """Return base64 images and MiniMax H3 slot indices sorted by slot."""
     items: list[tuple[int, str]] = []
     for ref in refs or []:
         tensor = getattr(ref, "tensor", None)

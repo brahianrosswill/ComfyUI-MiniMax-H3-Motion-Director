@@ -1359,8 +1359,8 @@ function getDirectorUiHeight(editor) {
 
 function hookTaskTypeWidget(node) {
     const tw = node.widgets?.find((w) => w.name === "task_type");
-    if (!tw || tw._berniniTaskHooked) return;
-    tw._berniniTaskHooked = true;
+    if (!tw || tw._minimaxTaskHooked) return;
+    tw._minimaxTaskHooked = true;
     const orig = tw.callback;
     tw.callback = function (...args) {
         const r = orig?.apply(this, args);
@@ -1462,7 +1462,7 @@ function bindDirectorDomWidgetSizing(node, widget) {
 }
 
 function initDirectorEditor(node) {
-    // Must not share Bernini's `_directorDomWidget` — their loadedGraphNode mounts on that key.
+    // Keep a private key; the upstream AIMixer Director mounts its editor on `_directorDomWidget`.
     if (!isMiniMaxH3MotionDirectorNode(node)) return null;
     if (node._minimaxEditor) return node._minimaxEditor;
     const container = node._minimaxDomWidget?.element;

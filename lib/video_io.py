@@ -375,7 +375,7 @@ def _resolve_load_dimensions(
             return sw, sh, False
 
         # Portrait-native video must not be rotated into a landscape target (common when
-        # browser metadata or node defaults supply 832脳480 for a vertical phone clip).
+        # browser metadata or node defaults supply 832×480 for a vertical phone clip).
         if native_portrait and storage_landscape:
             log.info(
                 "Video %dx%d portrait native vs storage %dx%d landscape; keeping orientation",

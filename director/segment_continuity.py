@@ -5,12 +5,13 @@
 # This derivative project is distributed under GPL-3.0.
 # See NOTICE and LICENSES/Apache-2.0-AIMixer.txt.
 
-"""Cross-segment continuity — **opt-in official Bernini path only**.
+"""Legacy opt-in pixel/latent handoff retained for old Director timelines.
 
-When continuity is **off**: Studio / per-segment path — segment source + user refs
-→ BerniniConditioning → KSamplerAdvanced → VAEDecode. No cross-segment injection.
+Current multi-segment workflows use exported Motion Context or Source Bridge.
+When this legacy continuity path is off, each segment uses standard MiniMax H3
+conditioning and sampling without its pixel/latent injection.
 
-When continuity is **on** (WanSCAIL-style handoff on the official Bernini stack):
+When the legacy path is on (SCAIL-style handoff on the MiniMax H3 stack):
 1. Prepend prev-tail pixels to ``source_video`` so canvas length matches generation
 2. Generate ``prefix + segment`` frames (Wan 4n+1), trim prefix after decode
 3. SCAIL latent prefix lock via ``noise_mask`` (prefix not resampled)
@@ -1197,7 +1198,7 @@ def prepend_continuity_source(
 
 
 def _normalize_context_latent_5d(latent: torch.Tensor) -> torch.Tensor:
-    """Match official BerniniConditioning: keep VAE encode as ``[1, C, F, H, W]``."""
+    """Keep MiniMax H3 VAE context in ``[1, C, F, H, W]`` form."""
     if latent.ndim == 3:
         latent = latent.unsqueeze(0).unsqueeze(2)
     elif latent.ndim == 4:

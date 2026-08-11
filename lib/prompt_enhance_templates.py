@@ -5,7 +5,7 @@
 # This derivative project is distributed under GPL-3.0.
 # See NOTICE and LICENSES/Apache-2.0-AIMixer.txt.
 
-"""Bernini per-task LLM enhancement templates (aligned with official prompt_enhancer)."""
+"""MiniMax H3 per-task LLM enhancement templates."""
 
 from __future__ import annotations
 
@@ -63,7 +63,7 @@ def _append_image_slot_rules(template: str, task_key: str, language: str) -> str
         return template
     if normalize_output_language(language) == "zh":
         rule = (
-            "\n\n硬性要求（Bernini 参考图）：官方 prompt token 为 image0、image1…（小写），"
+            "\n\n硬性要求（MiniMax H3 参考图）：官方 prompt token 为 image0、image1…（小写），"
             "与 reference_image_0/1 输入对应；不要写 reference image0。"
             "用户输入 @imageN 时按该编号定位参考图；输出必须保留 imageN，并写出该参考图真实可见的外观特征"
             "（禁止臆造）；不要 @ 前缀，不要 slot 一词。"
@@ -71,7 +71,7 @@ def _append_image_slot_rules(template: str, task_key: str, language: str) -> str
         )
     else:
         rule = (
-            "\n\nCRITICAL (Bernini reference slots): every reference to a reference image "
+            "\n\nCRITICAL (MiniMax H3 reference slots): every reference to a reference image "
             'MUST use "image0", "image1", … (lowercase, upload order). '
             'Example: "Replace the man with the woman from image0, preserving pose…". '
             'Do NOT use only "reference image" without the imageN tag. '

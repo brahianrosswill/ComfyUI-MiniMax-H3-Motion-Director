@@ -25,6 +25,7 @@ import torch
 import folder_paths
 
 from ..lib.image_prep import H3_SPATIAL_PIPELINE
+from ..lib.tensor_fingerprint import tensor_fingerprint
 from .frame_align import H3_REFERENCE_VIDEO_PIPELINE, H3_SOURCE_BRIDGE_PIPELINE
 from .color_reanchor import COLOR_REANCHOR_PIPELINE
 from .plan import DirectorPlan, SegmentPlan
@@ -70,6 +71,14 @@ def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str,
         "output_mode": plan.output_mode,
         "ref_max": plan.ref_max_size,
         "refs": ref_files,
+        "source_clip": tensor_fingerprint(getattr(seg, "source_clip", None)),
+        "ref_image_tensors": [
+            {
+                "index": int(getattr(ref, "index", -1)),
+                "tensor": tensor_fingerprint(getattr(ref, "tensor", None)),
+            }
+            for ref in getattr(seg, "refs", None) or []
+        ],
         "ref_audios": ref_audio_files,
         "ref_videos": ref_video_files,
         "ref_video": ref_video_file,
