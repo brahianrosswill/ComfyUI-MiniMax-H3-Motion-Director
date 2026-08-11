@@ -15,7 +15,7 @@
 - 在节点内编辑多段时间轴、分段提示词与参考素材。
 - 支持完整序列生成、勾选分段运行、全部导出和分段导出。
 - 支持模型内部采样，也支持外接标准 `SAMPLER` + `SIGMAS`。
-- R2V 提供默认收起的 `Common References` 独立面板，每段再叠加自己的 Local 素材；Common 不会复制进 Local，也不会泄漏到其他任务。
+- R2V 在“实时预览”旁提供 `Common References` 浮动素材管理器，每段再叠加自己的 Local 素材；Common 不会复制进 Local，也不会泄漏到其他任务。
 - 提示词中的图片、视频、音频引用使用可视化 Prompt chip，素材勾选变化后会自动重新编号。
 - 使用 latent-first Motion Context 延续上一段生成的视频状态与模型生成音频，并保留像素缓存作为兼容 fallback。
 - 使用可选的 Color Re-anchor 降低长链生成中的累积性色彩漂移。
@@ -146,7 +146,7 @@ python\python.exe -m pip install -r ComfyUI\custom_nodes\ComfyUI-MiniMax-H3-Moti
 
 ## R2V Common / Local 参考素材
 
-`Common References`（Common Asset Pool）是 R2V 专用、默认收起且独立于分段列表的素材面板，只保存 Picture、参考视频和参考音频，不含 Common Prompt。每段都有自己的完整 Prompt、`使用公共素材` 开关、Common 排除清单与 Local 素材区。运行时会先读取该段启用且未排除的 Common，再读取 Local，按 `Common → Local` 顺序压成没有空洞的官方槽位：`<Picture 1>`、`<Video 1>`、`<Audio 1>`……。新加入的 Common 默认对所有仍启用 Common 的分段生效；整段关闭 Common 后，后来加入的素材也不会自动开启该段。
+`Common References`（Common Asset Pool）是 R2V 专用浮动素材管理器。入口位于“实时预览”旁边，点击按钮打开或收起，点击外部或按 Escape 也会关闭；浮层不会进入分段列表、推高 Batch panel 或改变 Segment index。管理器只显示已经存在的 Picture、参考视频、参考音频 card，以及每类一个“添加”入口，不会预先画出 9/3/3 个空槽。新增素材自动使用该类型第一个可用内部 slot；替换保留原 asset ID，删除后重新新增才产生新身份。Common 不含 Prompt。每段都有自己的完整 Prompt、Common 排除清单与 Local 素材区。运行时会先读取该段启用且未排除的 Common，再读取 Local，按 `Common → Local` 顺序压成没有空洞的官方槽位：`<Picture 1>`、`<Video 1>`、`<Audio 1>`……。新加入的 Common 默认对所有仍启用 Common 的分段生效；整段关闭 Common 后，后来加入的素材也不会自动开启该段。
 
 例如 Common Pool 放入角色 A、B、C，Segment 1 的 Local 放入道具 D：
 
@@ -163,7 +163,7 @@ Segment 2 若取消全部 Common 且没有 Local，就是纯场景生成；它�
 
 ## Prompt chip 与素材引用
 
-在 R2V 提示词输入框键入 `@` 会打开当前分段的有效素材列表，只显示该段启用的 Common 和 Local。选中后插入不可拆开的 Prompt chip；chip 显示当前官方标签，内部保存稳定 asset ID。切换分段会同步正确 Prompt，不会把前一段文字覆盖到后一段；在编辑器内使用 Backspace、Delete、Space、方向键、Home/End 或输入法时，也不会触发时间轴删除、播放或逐帧快捷键。
+在 R2V 提示词输入框键入 `@` 会打开素材列表：包含当前分段启用与未启用的 Common，以及启用的 Local；不存在的素材不会列出。未启用 Common 会明确标记“本段未启用”，点击后会先为当前分段启用该素材、重新计算 effective mapping，再插入同一个稳定 semantic token。例如 B 原本关闭时，直接从菜单选择 B，就会自动成为当前有效的 `<Picture N>`。选中后插入不可拆开的 Prompt chip；chip 显示当前官方标签，内部保存稳定 asset ID。候选菜单挂在 Director 专用 overlay layer，位置会限制在 viewport 内，不会被 modal、滚动容器或 stacking context 遮住。切换分段会同步正确 Prompt，不会把前一段文字覆盖到后一段；在编辑器内使用 Backspace、Delete、Space、方向键、Home/End 或输入法时，也不会触发时间轴删除、播放或逐帧快捷键。
 
 - 方向键可移动候选项目，菜单会自动滚动到当前项。
 - Backspace/Delete 会一次删除整个 chip，不会把内部 token 切成残片，也不会触发节点删除快捷键。
@@ -211,7 +211,7 @@ Motion Context 的真实数据流是：
 → 写入下一段 MiniMax H3 conditioning
 ```
 
-这是 latent-first handoff：正常连续运行不需要先把上一段解码成 RGB，再重新 VAE encode。每段仍会保存最终导出 RGB/音频的像素缓存，供旧缓存、缺少 latent companion 或兼容路径使用。选择运行后续段时，优先读取版本化的 AV latent companion；若 companion 不存在但有效像素 cache 存在，会明确报告 `pixels (fallback)` 并走旧的 VAE encode 路径；两者都没有则直接报错。
+这是 latent-first handoff：正常连续运行直接使用同一次 Queue 内的内存结果，不需要依赖持久化磁盘 cache。为了支持以后只运行后续段，持久化 Motion Context cache 固定只保存上一段可见终点之前最多 39 帧的 RGB fallback、对应 waveform，以及可直接再次选取 1/5/22/39 帧的 AV latent tail；不会保存整段几百帧 RGB 或整份 sampled latent。选择运行后续段时，优先读取版本化的 AV latent tail；若 companion 不存在但有效像素 tail 存在，会明确报告 `pixels (fallback)` 并走旧的 VAE encode 路径；两者都没有则直接报错。
 
 Color Re-anchor 是刻意的例外。它必须在 RGB 画面上计算颜色统计，所以开启后 visual 路径会使用像素缓存并报告 `pixels (Color Re-anchor)`；Audio Context 仍可独立使用 latent-first，不会因为视觉调色一起退回 waveform encode。H3 为采样网格补出的尾部帧不会被当成已导出的上下文，handoff endpoint 永远不超过用户实际可见的上一段终点。
 
@@ -310,11 +310,22 @@ height % 32 == 0
 
 Director 使用版本化磁盘缓存：
 
-- segment cache：保存 nominal 分段解码结果，供部分重跑、全部导出和 Source Bridge 相邻 anchors 使用；
-- Motion Context 像素 cache：保存上一段最终导出帧与生成音频，作为兼容 fallback；
-- Motion Context AV latent companion：独立保存 CPU latent、可见 context endpoint、trim/export/sample 帧数，供 latent-first selection-run 恢复 continuity。
+- segment cache：只在“选择运行已开启 + 全部导出”或 Source Bridge 需要跨 Queue 复用相邻 anchors 时，保存完整 nominal 分段解码结果；普通完整连续生成和仅分段导出不会写入这类大型 RGB cache；
+- Motion Context 像素 cache：只保存可见导出终点的最后最多 39 帧 RGB，以及按真实 fps/sample rate 精确对应的末尾 waveform，作为兼容 fallback；
+- Motion Context AV latent companion：只保存最后最多 39 个可见帧对应的完整 H3 video latent blocks 与同时间窗 audio latent。H3 对齐产生、但超过可见 endpoint 的 overshoot 不会写入。
 
-Motion Context cache fingerprint 包含时间轴、提示词、seed、采样设置、模型选项、有效参考素材、Color Re-anchor 开关/算法版本、latent handoff pipeline，以及全局 32 spatial pipeline 版本。segment cache identity 记录分段范围、提示词、Common/Local asset ID 与内容、I2V/R2V anchor tensor、Source Bridge 版本和空间管线版本。对应 identity 发生变化时，旧缓存会失效；只有旧像素 cache 时会走明确的 fallback，不会伪装成 latent-first。
+Motion Context cache fingerprint 包含时间轴、提示词、seed、采样设置、模型选项、有效参考素材、Color Re-anchor 开关/算法版本、latent handoff pipeline，以及全局 32 spatial pipeline 版本。`context_length` 只是下一段消费 tail 时选择 1/5/22/39 帧的设置，不属于上一段生成结果身份；从 22 改成 39 不会仅因此让上一段 cache 失效。segment cache identity 记录分段范围、提示词、Common/Local asset ID 与内容、I2V/R2V anchor tensor、Source Bridge 版本和空间管线版本。对应生产 identity 发生变化时，旧缓存会失效；V1 的整段 Motion Context cache 也会直接视为 miss，不会和 V2 tail 格式混用。
+
+Source Bridge 在同一次 Queue 内会优先使用刚生成、仍在内存中的 nominal Segment，不会为了马上读取而先写入数 GB 文件；只有跨 Queue 缺少内存结果时才读取磁盘 Segment cache。所有 cache 写入仍是 best-effort：磁盘满、只读目录或发布失败不会中断当前主生成，但以后真正依赖缺失 cache 的选择运行或 Bridge 会清楚报错，不会偷偷补采样未选 Segment。
+
+这两个目录都可以手动删除：
+
+```text
+ComfyUI/output/minimax_seg_cache
+ComfyUI/output/minimax_motion_context_cache
+```
+
+删除不会损坏插件、模型或工作流，只会让旧的“选择运行 + 全部导出”、Motion Context 后续段续跑或 Source Bridge 跨 Queue 失去可复用结果；需要时重新生成前置 Segment 即可。普通完整连续生成的段间 Motion Context 仍走当前 Queue 的内存 handoff，不依赖这些目录。
 
 单独运行后续分段时：
 

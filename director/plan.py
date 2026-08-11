@@ -132,6 +132,9 @@ class DirectorPlan:
     export_max_frames: int = 0
     export_mode: str = "all"  # "all" | "segments"
     run_indices: frozenset[int] | None = None  # None = run all segments
+    # Kept separately because an enabled, all-selected run also needs to build
+    # reusable full-segment caches even though run_indices collapses to None.
+    run_select_enabled: bool = False
     continuity_enabled: bool = False
     continuity_overlap_frames: int = 0
     # Runtime executor setting. Stored on the plan so segment/context cache
@@ -464,9 +467,13 @@ def _trim_timeline_for_export(timeline: dict, export_total: int) -> dict:
     return t
 
 
+def _run_selection_enabled(timeline: dict) -> bool:
+    return bool(timeline.get("runSelectEnabled") or timeline.get("run_select_enabled"))
+
+
 def _parse_run_selection(timeline: dict, segment_count: int) -> frozenset[int] | None:
     """Return selected segment indices, or None when all segments should run."""
-    enabled = bool(timeline.get("runSelectEnabled") or timeline.get("run_select_enabled"))
+    enabled = _run_selection_enabled(timeline)
     if not enabled:
         return None
     raw = timeline.get("runSelection")
@@ -714,6 +721,7 @@ def build_director_plan(
         export_max_frames=export_max,
         export_mode=export_mode,
         run_indices=_parse_run_selection(timeline, len(segments)),
+        run_select_enabled=_run_selection_enabled(timeline),
         continuity_enabled=continuity_enabled,
         continuity_overlap_frames=continuity_overlap,
         global_ref_audios=global_ref_audios,

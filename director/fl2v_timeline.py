@@ -566,6 +566,7 @@ def build_fl2v_director_plan(
         SegmentPlan,
         SegmentRef,
         _parse_run_selection,
+        _run_selection_enabled,
         _resolve_export_mode,
     )
 
@@ -757,4 +758,5 @@ def build_fl2v_director_plan(
         raw=raw,
         export_mode=export_mode,
         run_indices=None,
+        run_select_enabled=_run_selection_enabled(timeline),
     )

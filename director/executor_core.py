@@ -88,6 +88,11 @@ from .plan import (
 )
 from .progress import report_director_finish, report_director_progress, report_director_segment_preview
 from .segment_cache import load_segment_cache, save_segment_cache
+from .cache_policy import (
+    resolve_nominal_segment_frames,
+    should_persist_segment_cache,
+    write_segment_cache_if_required,
+)
 from .source_bridge import (
     GeneratedSourceBridge,
     assemble_source_bridges,
@@ -405,6 +410,10 @@ def execute_director_plan_core(
         if source_bridge_enabled(left.task_key, requested_source_bridge)
         and source_bridge_enabled(right.task_key, requested_source_bridge)
     ]
+    persist_segment_cache = should_persist_segment_cache(
+        plan,
+        source_bridge_active=bool(source_bridge_pairs),
+    )
     # Strictly honor「选择运行」— never force-sample unselected segments.
     run_indices = plan.run_indices if plan.run_indices is not None else frozenset(range(len(all_segments)))
 
@@ -429,6 +438,10 @@ def execute_director_plan_core(
     reports.append(f"Motion Context handoff: {LATENT_HANDOFF_PIPELINE} (latent-first)")
     reports.append(f"Context frames: {requested_context}")
     reports.append(f"Source Bridge frames: {requested_source_bridge} (V2V/RV2V only)")
+    reports.append(
+        "Full segment disk cache: "
+        + ("ON (selection all-export / Source Bridge)" if persist_segment_cache else "OFF")
+    )
     if source_bridge_pairs:
         reports.append(
             "Source Bridge v1: nominal segment generations + an independent "
@@ -972,7 +985,10 @@ def execute_director_plan_core(
                 "waveform": audio_dict["waveform"].detach().cpu(),
                 "sample_rate": int(audio_dict["sample_rate"]),
             }
-        save_segment_cache(node_id, seg, plan, chunk)
+        write_segment_cache_if_required(
+            persist_segment_cache,
+            lambda: save_segment_cache(node_id, seg, plan, chunk),
+        )
         if motion_enabled:
             if not save_motion_context_cache(
                 node_id,
@@ -1095,6 +1111,10 @@ def execute_director_plan_core(
         if plan.export_mode != "all":
             continue
 
+        # Full-export reconstruction always requires the full segment cache.
+        # Motion Context caches are endpoint tails and must never masquerade as
+        # a complete old segment after the V2 tail-cache migration.
+        cached = load_segment_cache(node_id, seg, plan)
         cached_context = None
         cached_latent_context = None
         if motion_enabled:
@@ -1105,9 +1125,6 @@ def execute_director_plan_core(
                 settings=cache_settings,
             )
         if source_bridge_enabled(seg.task_key, requested_source_bridge):
-            # Source Bridge anchors require the nominal generated segment cache,
-            # never an exported Motion Context tail or source passthrough.
-            cached = load_segment_cache(node_id, seg, plan)
             cached_context = load_motion_context_cache(
                 node_id,
                 seg,
@@ -1123,9 +1140,6 @@ def execute_director_plan_core(
                 settings=cache_settings,
                 strict=False,
             )
-            cached = cached_context.frames if cached_context is not None else None
-        else:
-            cached = load_segment_cache(node_id, seg, plan)
         if cached_latent_context is not None:
             cached_context = CachedMotionContext(
                 frames=cached_context.frames if cached_context is not None else None,
@@ -1202,26 +1216,17 @@ def execute_director_plan_core(
 
     def _nominal_for_bridge(seg) -> torch.Tensor:
         index = int(seg.index)
-        frames = nominal_generated_frames.get(index)
-        if frames is not None:
-            return frames
-        frames = load_segment_cache(node_id, seg, plan)
-        if frames is None:
-            raise ValueError(
-                "Source Bridge requires both adjacent generated segments. Run the "
-                "complete sequence once or generate the missing adjacent segment first."
-            )
-        frames = frames.detach().cpu().float()
-        if int(frames.shape[0]) != int(seg.frame_count):
-            raise ValueError(
-                "Source Bridge requires both adjacent generated segments. Run the "
-                "complete sequence once or generate the missing adjacent segment first."
-            )
-        nominal_generated_frames[index] = frames
-        reports.append(
-            f"Segment {int(seg.timeline_index) + 1}: loaded validated nominal "
-            "segment cache for Source Bridge."
+        frames, loaded_from_disk = resolve_nominal_segment_frames(
+            nominal_generated_frames,
+            segment_index=index,
+            expected_frames=int(seg.frame_count),
+            disk_loader=lambda: load_segment_cache(node_id, seg, plan),
         )
+        if loaded_from_disk:
+            reports.append(
+                f"Segment {int(seg.timeline_index) + 1}: loaded validated nominal "
+                "segment cache for Source Bridge."
+            )
         return frames
 
     generated_bridges: list[GeneratedSourceBridge] = []

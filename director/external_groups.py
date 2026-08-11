@@ -381,6 +381,7 @@ def build_plan_from_external_groups(
         _load_ref_audios,
         _load_ref_videos,
         _load_refs,
+        _run_selection_enabled,
         reinforce_r2v_prompt,
     )
 
@@ -770,4 +771,5 @@ def build_plan_from_external_groups(
             if len(indices) == planned_count
             else frozenset(int(index) for index in indices)
         ),
+        run_select_enabled=_run_selection_enabled(timeline),
     )

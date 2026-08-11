@@ -57,3 +57,8 @@ def test_readme_does_not_present_removed_or_misleading_behavior_as_current():
     assert "Reroute" in text
     assert "仅尾帧" in text
     assert "Prompt chip" in text
+    assert "最后最多 39 帧" in text
+    assert "context_length" in text
+    assert "选择运行已开启 + 全部导出" in text
+    assert "ComfyUI/output/minimax_seg_cache" in text
+    assert "ComfyUI/output/minimax_motion_context_cache" in text

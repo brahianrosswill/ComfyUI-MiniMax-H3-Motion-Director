@@ -372,6 +372,7 @@ def build_gen_director_plan(
         _load_ref_videos,
         _load_refs,
         _parse_run_selection,
+        _run_selection_enabled,
         _resolve_export_mode,
         segment_ref_audios_for_context,
         segment_refs_for_context,
@@ -654,4 +655,5 @@ def build_gen_director_plan(
         raw=raw,
         export_mode=export_mode,
         run_indices=_parse_run_selection(timeline, len(segments)),
+        run_select_enabled=_run_selection_enabled(timeline),
     )
