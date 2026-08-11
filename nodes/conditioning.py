@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import torch
 
-from ..lib.image_prep import fit_canvas
+from ..lib.image_prep import fit_canvas, preflight_h3_visual_conditioning
 from ..lib.ref_images import MAX_REFERENCE_IMAGES, REF_IMAGE_KEY_PREFIX, flatten_reference_kwargs
 from ..lib.task_modes import TASK_DESCRIPTIONS, infer_task
 from ..patches.markers import MC_KEY
@@ -203,10 +203,16 @@ def run_minimax_conditioning(
     **kwargs,
 ):
     """Build positive conditioning + AV latent via official MiniMax H3 nodes."""
-    MiniMaxH3ImageToVideo, MiniMaxH3ReferenceToVideo = _load_minimax_nodes()
-
     ref_images = ref_images or _reference_images_dict_from_kwargs(kwargs)
     ref_videos = _reference_videos_dict(ref_videos)
+    for name, frames in (ref_videos or {}).items():
+        preflight_h3_visual_conditioning(
+            frames,
+            task_key=task_key,
+            path=f"reference_video:{name}",
+        )
+
+    MiniMaxH3ImageToVideo, MiniMaxH3ReferenceToVideo = _load_minimax_nodes()
 
     use_reference = (
         task_key in {"r2v", "v2v", "rv2v"}

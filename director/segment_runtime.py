@@ -198,7 +198,11 @@ def source_passthrough_chunk(plan: DirectorPlan, seg) -> torch.Tensor:
     if plan.output_mode == "fixed":
         clip = fit_canvas(raw_clip, plan.width, plan.height)
     else:
-        clip = fit_video_long_edge(raw_clip, plan.ref_max_size)
+        clip = fit_video_long_edge(
+            raw_clip,
+            plan.ref_max_size,
+            stride=int(getattr(plan, "spatial_stride", 16)),
+        )
     return pad_or_trim_frames(clip, target_len).cpu().float()
 
 

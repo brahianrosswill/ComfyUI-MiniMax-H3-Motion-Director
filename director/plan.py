@@ -139,6 +139,7 @@ class DirectorPlan:
     source_overlap_frames: int = 0
     # Runtime-only setting appended to the node schema for old workflow safety.
     color_reanchor_enabled: bool = False
+    spatial_stride: int = 16
     global_ref_audios: list[SegmentRefAudio] = field(default_factory=list)
 
     @property

@@ -13,9 +13,70 @@ import torch
 from comfy.utils import common_upscale
 
 
+H3_BASE_SPATIAL_STRIDE = 16
+H3_CONDITIONING_SPATIAL_STRIDE = 32
+H3_SPATIAL_PIPELINE = "h3_task_aware_spatial_stride_v1"
+H3_VISUAL_MOTION_CONTEXT_TASKS = frozenset({"t2v", "i2v", "fl2v", "r2v", "v2v", "rv2v"})
+
+
 def snap_dimension(value: int, stride: int) -> int:
     """Round *value* to the nearest multiple of *stride*, keeping at least *stride*."""
     return max(stride, round(value / stride) * stride)
+
+
+def resolve_h3_canvas(width: int, height: int, *, stride: int) -> tuple[int, int]:
+    """Snap one authoritative H3 canvas without changing its time axis."""
+    return snap_dimension(int(width), int(stride)), snap_dimension(int(height), int(stride))
+
+
+def resolve_h3_spatial_stride(
+    task_key: str,
+    *,
+    segment_count: int = 1,
+    motion_context_enabled: bool = False,
+    has_reference_video: bool = False,
+    source_bridge_frames: int = 0,
+) -> int:
+    """Return the authoritative pixel stride for one H3 task/path combination."""
+    task = str(task_key or "").strip().lower()
+    if task in {"v2v", "rv2v"}:
+        return H3_CONDITIONING_SPATIAL_STRIDE
+    if bool(has_reference_video):
+        return H3_CONDITIONING_SPATIAL_STRIDE
+    if int(source_bridge_frames or 0) > 0 and task in {"v2v", "rv2v"}:
+        return H3_CONDITIONING_SPATIAL_STRIDE
+    if (
+        bool(motion_context_enabled)
+        and int(segment_count) > 1
+        and task in H3_VISUAL_MOTION_CONTEXT_TASKS
+    ):
+        return H3_CONDITIONING_SPATIAL_STRIDE
+    return H3_BASE_SPATIAL_STRIDE
+
+
+def preflight_h3_visual_conditioning(
+    frames: torch.Tensor,
+    *,
+    task_key: str,
+    path: str,
+    required_stride: int = H3_CONDITIONING_SPATIAL_STRIDE,
+) -> torch.Tensor:
+    """Fail before H3 patchify when a visual conditioning tensor is not grid-safe."""
+    if not isinstance(frames, torch.Tensor) or frames.ndim != 4:
+        raise ValueError(
+            "H3 visual conditioning expects IMAGE frames [F,H,W,C]: "
+            f"task={task_key} path={path} required_stride={int(required_stride)}"
+        )
+    height = int(frames.shape[1])
+    width = int(frames.shape[2])
+    stride = int(required_stride)
+    if width % stride or height % stride:
+        raise ValueError(
+            "H3 visual conditioning requires 32-pixel spatial alignment: "
+            f"task={task_key} path={path} size={width}x{height} "
+            f"required_stride={stride}"
+        )
+    return frames
 
 
 def fit_long_edge(image: torch.Tensor, max_edge: int, stride: int = 16) -> torch.Tensor:

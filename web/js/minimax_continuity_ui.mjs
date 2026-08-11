@@ -11,6 +11,7 @@ export const VIDEO_CONTINUITY_STRATEGIES = Object.freeze({
 
 const BRIDGE_TASKS = new Set(["v2v", "rv2v"]);
 const MOTION_CONTEXT_TASKS = new Set(["t2v", "i2v", "r2v", "fl2v"]);
+const VISUAL_MOTION_CONTEXT_TASKS = new Set(["t2v", "i2v", "r2v", "fl2v", "v2v", "rv2v"]);
 
 function boolValue(value) {
     if (value === false || value === 0 || value == null) return false;
@@ -20,6 +21,25 @@ function boolValue(value) {
 
 export function normalizeSourceBridgeValue(value) {
     return boolValue(value) ? SOURCE_BRIDGE_FIXED_FRAMES : 0;
+}
+
+export function resolveH3SpatialStride({
+    taskKey,
+    segmentCount = 1,
+    motionContextEnabled = false,
+    hasReferenceVideo = false,
+    sourceBridgeValue = 0,
+} = {}) {
+    const task = String(taskKey || "").trim().toLowerCase();
+    if (BRIDGE_TASKS.has(task)) return 32;
+    if (boolValue(hasReferenceVideo)) return 32;
+    if (normalizeSourceBridgeValue(sourceBridgeValue) > 0 && BRIDGE_TASKS.has(task)) return 32;
+    if (
+        boolValue(motionContextEnabled)
+        && Number(segmentCount) > 1
+        && VISUAL_MOTION_CONTEXT_TASKS.has(task)
+    ) return 32;
+    return 16;
 }
 
 export function videoStrategyBackendPatch(strategy) {

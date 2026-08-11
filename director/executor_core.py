@@ -14,7 +14,13 @@ from typing import Any
 
 import torch
 
-from ..lib.image_prep import fit_canvas, fit_video_long_edge
+from ..lib.image_prep import (
+    H3_SPATIAL_PIPELINE,
+    fit_canvas,
+    fit_video_long_edge,
+    resolve_h3_canvas,
+    resolve_h3_spatial_stride,
+)
 from ..lib.task_modes import SUPPORTED_TASK_KEYS
 from ..nodes.conditioning import (
     append_minimax_keyframe_anchors,
@@ -154,6 +160,13 @@ def _ref_tensor_from_seg_refs(refs, index: int) -> torch.Tensor | None:
             if t.shape[0] > 0:
                 return t[:1]
     return None
+
+
+def _segment_has_reference_video(segment) -> bool:
+    if getattr(segment, "ref_videos", None):
+        return True
+    meta = getattr(segment, "reference_video_meta", None) or {}
+    return bool(str(meta.get("videoFile") or meta.get("fileName") or "").strip())
 
 
 def _build_minimax_inputs(
@@ -309,6 +322,22 @@ def execute_director_plan_core(
         requested_source_bridge == 5
         and any(seg.task_key in {"v2v", "rv2v"} for seg in plan.segments)
     )
+    plan_spatial_stride = max(
+        resolve_h3_spatial_stride(
+            seg.task_key,
+            segment_count=len(plan.segments),
+            motion_context_enabled=motion_enabled,
+            has_reference_video=_segment_has_reference_video(seg),
+            source_bridge_frames=requested_source_bridge,
+        )
+        for seg in plan.segments
+    )
+    plan.spatial_stride = int(plan_spatial_stride)
+    plan.width, plan.height = resolve_h3_canvas(
+        plan.width,
+        plan.height,
+        stride=plan_spatial_stride,
+    )
     if (motion_enabled or bridge_feature_active) and len(plan.segments) > 1:
         patch_ready, patch_reason = motion_context_patch_status()
         if not patch_ready:
@@ -330,6 +359,12 @@ def execute_director_plan_core(
         "model_options": _stable_cache_value(getattr(model, "model_options", {}) or {}),
     }
     cache_settings.update(color_reanchor_cache_settings(color_reanchor_requested))
+    cache_settings.update(
+        {
+            "spatial_stride": int(plan_spatial_stride),
+            "spatial_pipeline": H3_SPATIAL_PIPELINE,
+        }
+    )
     if any(seg.task_key in {"v2v", "rv2v"} for seg in plan.segments):
         cache_settings["reference_video_pipeline"] = H3_REFERENCE_VIDEO_PIPELINE
         cache_settings["source_bridge_pipeline"] = H3_SOURCE_BRIDGE_PIPELINE
@@ -397,6 +432,10 @@ def execute_director_plan_core(
         )
     reports.append(f"Audio context: {'ON' if audio_context_active else 'OFF'}")
     reports.append(f"Color Re-anchor: {'ON' if color_reanchor_requested else 'OFF'}")
+    reports.append(
+        f"H3 spatial stride: {int(plan_spatial_stride)} "
+        f"(authoritative canvas {int(plan.width)}x{int(plan.height)})"
+    )
     reports.append(f"Sampling mode: {sampling_mode} (automatic connection detection)")
     if sampling_mode == "internal":
         reports.append(f"Sampler source: internal {sampler}")
@@ -539,7 +578,11 @@ def execute_director_plan_core(
             if plan.output_mode == "fixed":
                 visible_clip_frames = fit_canvas(body_raw, plan.width, plan.height)
             else:
-                visible_clip_frames = fit_video_long_edge(body_raw, plan.ref_max_size)
+                visible_clip_frames = fit_video_long_edge(
+                    body_raw,
+                    plan.ref_max_size,
+                    stride=plan_spatial_stride,
+                )
         else:
             visible_clip_frames = None
 
@@ -593,6 +636,7 @@ def execute_director_plan_core(
                 reference_clip_frames = fit_video_long_edge(
                     prepared_reference_raw,
                     plan.ref_max_size,
+                    stride=plan_spatial_stride,
                 )
             reports.append(
                 f"Segment {timeline_slot + 1} {seg.task_key.upper()}:\n"
@@ -728,6 +772,12 @@ def execute_director_plan_core(
             prev_tail=prev_tail,
         )
 
+        if ref_videos:
+            ref_videos = {
+                name: fit_canvas(frames, ctx_w, ctx_h)
+                for name, frames in ref_videos.items()
+            }
+
         if seg.task_key in {"r2v", "v2v", "rv2v"} and (
             ref_images or ref_videos or ref_audios or ref_video_audios
         ) and audio_vae is None:
@@ -766,6 +816,7 @@ def execute_director_plan_core(
                 fps=float(plan.frame_rate or 24.0),
                 color_reanchor_enabled=color_reanchor_requested,
                 color_anchor=color_anchor,
+                task_key=seg.task_key,
             )
 
         report_director_progress(
@@ -1107,7 +1158,11 @@ def execute_director_plan_core(
         if plan.output_mode == "fixed":
             bridge_source = fit_canvas(bridge_raw, plan.width, plan.height)
         else:
-            bridge_source = fit_video_long_edge(bridge_raw, plan.ref_max_size)
+            bridge_source = fit_video_long_edge(
+                bridge_raw,
+                plan.ref_max_size,
+                stride=plan_spatial_stride,
+            )
         bridge_height = int(bridge_source.shape[1])
         bridge_width = int(bridge_source.shape[2])
 

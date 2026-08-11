@@ -248,7 +248,11 @@ def prepare_director_plan(
 def _fit_source_clip_to_plan(plan, raw_clip: torch.Tensor) -> torch.Tensor:
     if plan.output_mode == "fixed":
         return fit_canvas(raw_clip, plan.width, plan.height)
-    return fit_video_long_edge(raw_clip, plan.ref_max_size)
+    return fit_video_long_edge(
+        raw_clip,
+        plan.ref_max_size,
+        stride=int(getattr(plan, "spatial_stride", 16)),
+    )
 
 
 def build_source_images_output(

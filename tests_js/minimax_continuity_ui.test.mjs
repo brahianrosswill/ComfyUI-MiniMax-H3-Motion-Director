@@ -9,6 +9,7 @@ import {
     normalizeSourceBridgeValue,
     notifyWidgetValueChange,
     resolveContinuityUiState,
+    resolveH3SpatialStride,
     restoreDisabledWidgetValue,
     setNodeInputTooltip,
     setWidgetTooltip,
@@ -259,6 +260,39 @@ test("legacy workflow values insert Color Re-anchor false without shifting later
         [true, 22, 5, true, false, 25, "res_multistep", "simple"],
     );
     assert.equal(migrateColorReanchorWidgetValues(legacy, currentWidgets), false);
+});
+
+test("frontend mirrors task-aware H3 conditioning stride without globally forcing 32", () => {
+    assert.equal(resolveH3SpatialStride({
+        taskKey: "i2v",
+        segmentCount: 1,
+        motionContextEnabled: false,
+    }), 16);
+    assert.equal(resolveH3SpatialStride({
+        taskKey: "i2v",
+        segmentCount: 3,
+        motionContextEnabled: true,
+    }), 32);
+    assert.equal(resolveH3SpatialStride({
+        taskKey: "r2v",
+        segmentCount: 1,
+        motionContextEnabled: false,
+        hasReferenceVideo: false,
+    }), 16);
+    assert.equal(resolveH3SpatialStride({
+        taskKey: "r2v",
+        segmentCount: 1,
+        motionContextEnabled: false,
+        hasReferenceVideo: true,
+    }), 32);
+    for (const taskKey of ["v2v", "rv2v"]) {
+        assert.equal(resolveH3SpatialStride({ taskKey, segmentCount: 1 }), 32);
+        assert.equal(resolveH3SpatialStride({
+            taskKey,
+            segmentCount: 2,
+            sourceBridgeValue: 5,
+        }), 32);
+    }
 });
 
 test("hidden widgets consume zero height and restore their original size", () => {

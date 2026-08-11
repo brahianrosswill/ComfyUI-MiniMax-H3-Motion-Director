@@ -13,6 +13,7 @@ from typing import Any
 
 import torch
 
+from ..lib.image_prep import preflight_h3_visual_conditioning
 from ..patches import MC_AUDIO_KEY, MC_KEY, motion_context_patch_status
 from .color_reanchor import apply_color_reanchor
 
@@ -106,6 +107,7 @@ def _encode_video_context(
     span: int,
     color_reanchor_enabled: bool = False,
     color_anchor: torch.Tensor | None = None,
+    task_key: str = "unknown",
 ) -> tuple[list[dict[str, Any]], int, str]:
     if int(frames.shape[0]) < span:
         raise ValueError(
@@ -121,6 +123,11 @@ def _encode_video_context(
             anchor = _resize_frames(color_anchor[:1], width, height)
             tail = apply_color_reanchor(tail, anchor)
             color_status = "ON"
+    preflight_h3_visual_conditioning(
+        tail,
+        task_key=task_key,
+        path="motion_context",
+    )
     try:
         encoded = vae.encode(tail)
     except torch.cuda.OutOfMemoryError as exc:
@@ -301,6 +308,7 @@ def apply_exported_motion_context(
     fps: float,
     color_reanchor_enabled: bool = False,
     color_anchor: torch.Tensor | None = None,
+    task_key: str = "unknown",
 ) -> tuple[list, MotionContextInfo]:
     ready, reason = motion_context_patch_status()
     if not ready:
@@ -338,6 +346,7 @@ def apply_exported_motion_context(
         span=int(context_span),
         color_reanchor_enabled=bool(color_reanchor_enabled),
         color_anchor=color_anchor,
+        task_key=task_key,
     )
     motion_audio_ref = None
     audio_steps = 0

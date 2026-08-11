@@ -24,6 +24,7 @@ import torch
 
 import folder_paths
 
+from ..lib.image_prep import H3_SPATIAL_PIPELINE
 from .frame_align import H3_REFERENCE_VIDEO_PIPELINE, H3_SOURCE_BRIDGE_PIPELINE
 from .color_reanchor import COLOR_REANCHOR_PIPELINE
 from .plan import DirectorPlan, SegmentPlan
@@ -79,6 +80,8 @@ def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str,
         "continuity_pipeline": "minimax_h3_lastframe_v1",
         "color_reanchor_enabled": bool(getattr(plan, "color_reanchor_enabled", False)),
         "color_reanchor_pipeline": COLOR_REANCHOR_PIPELINE,
+        "spatial_stride": int(getattr(plan, "spatial_stride", 16)),
+        "spatial_pipeline": H3_SPATIAL_PIPELINE,
     }
     if seg.task_key in {"v2v", "rv2v"}:
         fingerprint["reference_video_pipeline"] = H3_REFERENCE_VIDEO_PIPELINE

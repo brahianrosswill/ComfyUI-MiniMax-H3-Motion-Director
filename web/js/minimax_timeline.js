@@ -94,6 +94,7 @@ import {
     migrateColorReanchorWidgetValues,
     normalizeSourceBridgeValue,
     resolveContinuityUiState,
+    resolveH3SpatialStride,
     restoreDisabledWidgetValue,
     setNodeInputTooltip,
     setWidgetTooltip,
@@ -670,6 +671,12 @@ function refreshDirectorContinuityUi(node, editor = node?._minimaxEditor) {
     });
     source.value = state.sourceBridgeValue;
     node._mmxContinuityUiState = state;
+    const spatialStride = editor?.getH3SpatialStride?.();
+    if (spatialStride && editor._mmxH3SpatialStride !== spatialStride) {
+        editor._mmxH3SpatialStride = spatialStride;
+        editor.syncOutputToWidgets?.();
+        editor.scheduleTimelineSync?.();
+    }
 
     restoreContinuityRenderer(motion);
     restoreContinuityRenderer(audio);
@@ -1133,16 +1140,17 @@ function snapDim(v, stride = 32) {
 /**
  * Match Python ``lib.image_prep.fit_long_edge``:
  * round(dim * scale / stride) * stride — keeps aspect, long side ≤ budget.
- * Stride 16 (backend); stride 32 would bump 848 → 864.
+ * Stride is selected per H3 path: base generation can use 16, while visual
+ * video conditioning uses 32.
  */
 function snapScaledDim(dim, scale, stride = 16) {
     return Math.max(stride, Math.round((dim * scale) / stride) * stride);
 }
 
-function resolveOutputDimensions(sourceW, sourceH, output, fallback = {}) {
+function resolveOutputDimensions(sourceW, sourceH, output, fallback = {}, spatialStride = 16) {
     const mode = String(output?.mode || "long_edge").toLowerCase();
-    const fixedStride = 32;
-    const longStride = 16;
+    const fixedStride = Math.max(32, Number(spatialStride) || 16);
+    const longStride = Math.max(16, Number(spatialStride) || 16);
     if (mode === "fixed") {
         const w = snapDim(+(output?.width ?? fallback.width ?? 864), fixedStride);
         const h = snapDim(+(output?.height ?? fallback.height ?? 480), fixedStride);
@@ -2203,7 +2211,7 @@ class MiniMaxH3MotionDirectorEditor {
         const src = this.getSourceDimensions();
         const resolved = resolveOutputDimensions(src.width, src.height, this.timeline.output || {}, {
             refMaxSize: this.refMaxWidget?.value,
-        });
+        }, this.getH3SpatialStride());
         const storageW = resolved.width || video.storageWidth || this._storageWidth;
         const storageH = resolved.height || video.storageHeight || this._storageHeight;
         const clips = this.getVideoClips().map((c) => ({
@@ -3096,6 +3104,28 @@ class MiniMaxH3MotionDirectorEditor {
     getRunnableSegmentCount() {
         if (this.isFl2vMode()) return fl2vStartIndices(this).length;
         return this.timeline.segments?.length || 0;
+    }
+
+    hasH3ReferenceVideoConditioning(taskKey = this.getTaskKey()) {
+        if (taskKey !== "r2v") return false;
+        const hasFile = (item) => !!(item?.videoFile || item?.fileName);
+        if (hasFile(this.timeline.global?.referenceVideo)) return true;
+        if ((this.timeline.global?.refVideos || []).some(hasFile)) return true;
+        return (this.timeline.segments || []).some((segment) => (
+            hasFile(segment?.referenceVideo)
+            || (segment?.refVideos || []).some(hasFile)
+        ));
+    }
+
+    getH3SpatialStride() {
+        const taskKey = this.getTaskKey();
+        return resolveH3SpatialStride({
+            taskKey,
+            segmentCount: this.getRunnableSegmentCount(),
+            motionContextEnabled: this.widget("motion_context_enabled")?.value,
+            sourceBridgeValue: this.widget("source_overlap_frames")?.value,
+            hasReferenceVideo: this.hasH3ReferenceVideoConditioning(taskKey),
+        });
     }
 
     supportsRunSelect() {
@@ -5012,7 +5042,7 @@ class MiniMaxH3MotionDirectorEditor {
                 const src = this.getI2iSourceDimensions();
                 const resolved = resolveOutputDimensions(src.width, src.height, out, {
                     refMaxSize: this.refMaxWidget?.value,
-                });
+                }, this.getH3SpatialStride());
                 const note = src.width > 0 ? "" : t("output.preview.needSourceForLongEdge");
                 this.outPreview.textContent = `→ ${resolved.width}×${resolved.height}${note}${this._exportPreviewSuffix()}`;
             } else {
@@ -5053,7 +5083,7 @@ class MiniMaxH3MotionDirectorEditor {
             width: this.widthWidget?.value,
             height: this.heightWidget?.value,
             refMaxSize: this.refMaxWidget?.value,
-        });
+        }, this.getH3SpatialStride());
         if (src.width > 0 && src.height > 0) {
             const mode = (out.mode || "long_edge").toLowerCase();
             const note = mode === "long_edge"
@@ -5164,7 +5194,7 @@ class MiniMaxH3MotionDirectorEditor {
                     width: this.widthWidget?.value,
                     height: this.heightWidget?.value,
                     refMaxSize: this.refMaxWidget?.value,
-                });
+                }, this.getH3SpatialStride());
                 this.timeline.output = {
                     ...out,
                     mode: "long_edge",
@@ -5207,7 +5237,7 @@ class MiniMaxH3MotionDirectorEditor {
             width: this.timeline.width,
             height: this.timeline.height,
             refMaxSize: this.timeline.refMaxSize,
-        });
+        }, this.getH3SpatialStride());
         // Preserve audioMode / aspect / megapixels etc. — do not rebuild a bare object.
         this.timeline.output = {
             ...prevOut,
@@ -6074,7 +6104,7 @@ class MiniMaxH3MotionDirectorEditor {
 
         const store = resolveOutputDimensions(meta.width, meta.height, this.timeline.output || { mode: "long_edge", longEdge: 864 }, {
             refMaxSize: this.refMaxWidget?.value,
-        });
+        }, this.getH3SpatialStride());
 
         return { fileName, relPath, subfolder, type, meta, totalFrames, store, viewUrl };
     }
