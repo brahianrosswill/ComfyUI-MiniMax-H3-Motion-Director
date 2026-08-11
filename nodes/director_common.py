@@ -251,7 +251,7 @@ def _fit_source_clip_to_plan(plan, raw_clip: torch.Tensor) -> torch.Tensor:
     return fit_video_long_edge(
         raw_clip,
         plan.ref_max_size,
-        stride=int(getattr(plan, "spatial_stride", 16)),
+        stride=int(getattr(plan, "spatial_stride", 32)),
     )
 
 

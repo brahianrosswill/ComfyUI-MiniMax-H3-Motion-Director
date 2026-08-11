@@ -30,16 +30,12 @@ export function resolveH3SpatialStride({
     hasReferenceVideo = false,
     sourceBridgeValue = 0,
 } = {}) {
-    const task = String(taskKey || "").trim().toLowerCase();
-    if (BRIDGE_TASKS.has(task)) return 32;
-    if (boolValue(hasReferenceVideo)) return 32;
-    if (normalizeSourceBridgeValue(sourceBridgeValue) > 0 && BRIDGE_TASKS.has(task)) return 32;
-    if (
-        boolValue(motionContextEnabled)
-        && Number(segmentCount) > 1
-        && VISUAL_MOTION_CONTEXT_TASKS.has(task)
-    ) return 32;
-    return 16;
+    void taskKey;
+    void segmentCount;
+    void motionContextEnabled;
+    void hasReferenceVideo;
+    void sourceBridgeValue;
+    return 32;
 }
 
 export function videoStrategyBackendPatch(strategy) {

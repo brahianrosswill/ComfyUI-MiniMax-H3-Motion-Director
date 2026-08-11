@@ -1147,17 +1147,16 @@ function snapDim(v, stride = 32) {
 /**
  * Match Python ``lib.image_prep.fit_long_edge``:
  * round(dim * scale / stride) * stride — keeps aspect, long side ≤ budget.
- * Stride is selected per H3 path: base generation can use 16, while visual
- * video conditioning uses 32.
+ * Every H3 path uses the same 32-pixel canvas grid.
  */
-function snapScaledDim(dim, scale, stride = 16) {
+function snapScaledDim(dim, scale, stride = 32) {
     return Math.max(stride, Math.round((dim * scale) / stride) * stride);
 }
 
-function resolveOutputDimensions(sourceW, sourceH, output, fallback = {}, spatialStride = 16) {
+function resolveOutputDimensions(sourceW, sourceH, output, fallback = {}, spatialStride = 32) {
     const mode = String(output?.mode || "long_edge").toLowerCase();
-    const fixedStride = Math.max(32, Number(spatialStride) || 16);
-    const longStride = Math.max(16, Number(spatialStride) || 16);
+    const fixedStride = Math.max(32, Number(spatialStride) || 32);
+    const longStride = Math.max(32, Number(spatialStride) || 32);
     if (mode === "fixed") {
         const w = snapDim(+(output?.width ?? fallback.width ?? 864), fixedStride);
         const h = snapDim(+(output?.height ?? fallback.height ?? 480), fixedStride);

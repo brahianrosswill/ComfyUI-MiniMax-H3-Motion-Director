@@ -13,10 +13,9 @@ import torch
 from comfy.utils import common_upscale
 
 
-H3_BASE_SPATIAL_STRIDE = 16
-H3_CONDITIONING_SPATIAL_STRIDE = 32
-H3_SPATIAL_PIPELINE = "h3_task_aware_spatial_stride_v1"
-H3_VISUAL_MOTION_CONTEXT_TASKS = frozenset({"t2v", "i2v", "fl2v", "r2v", "v2v", "rv2v"})
+H3_SPATIAL_STRIDE = 32
+H3_CONDITIONING_SPATIAL_STRIDE = H3_SPATIAL_STRIDE
+H3_SPATIAL_PIPELINE = "h3_global_spatial_stride_32_v2"
 
 
 def snap_dimension(value: int, stride: int) -> int:
@@ -37,21 +36,9 @@ def resolve_h3_spatial_stride(
     has_reference_video: bool = False,
     source_bridge_frames: int = 0,
 ) -> int:
-    """Return the authoritative pixel stride for one H3 task/path combination."""
-    task = str(task_key or "").strip().lower()
-    if task in {"v2v", "rv2v"}:
-        return H3_CONDITIONING_SPATIAL_STRIDE
-    if bool(has_reference_video):
-        return H3_CONDITIONING_SPATIAL_STRIDE
-    if int(source_bridge_frames or 0) > 0 and task in {"v2v", "rv2v"}:
-        return H3_CONDITIONING_SPATIAL_STRIDE
-    if (
-        bool(motion_context_enabled)
-        and int(segment_count) > 1
-        and task in H3_VISUAL_MOTION_CONTEXT_TASKS
-    ):
-        return H3_CONDITIONING_SPATIAL_STRIDE
-    return H3_BASE_SPATIAL_STRIDE
+    """Return the one authoritative pixel stride used by every H3 task."""
+    del task_key, segment_count, motion_context_enabled, has_reference_video, source_bridge_frames
+    return H3_SPATIAL_STRIDE
 
 
 def preflight_h3_visual_conditioning(
@@ -79,7 +66,7 @@ def preflight_h3_visual_conditioning(
     return frames
 
 
-def fit_long_edge(image: torch.Tensor, max_edge: int, stride: int = 16) -> torch.Tensor:
+def fit_long_edge(image: torch.Tensor, max_edge: int, stride: int = H3_SPATIAL_STRIDE) -> torch.Tensor:
     """Match official ComfyUI H3 long-edge resizing and snap to the requested stride."""
     rgb = image[:, :, :, :3]
     height, width = rgb.shape[1], rgb.shape[2]
@@ -104,7 +91,11 @@ def fit_canvas(
     ).movedim(1, -1)
 
 
-def fit_video_long_edge(frames: torch.Tensor, max_edge: int, stride: int = 16) -> torch.Tensor:
+def fit_video_long_edge(
+    frames: torch.Tensor,
+    max_edge: int,
+    stride: int = H3_SPATIAL_STRIDE,
+) -> torch.Tensor:
     """Scale each frame so its long side is at most *max_edge*, preserving aspect ratio."""
     if frames.shape[0] == 0:
         return frames
@@ -157,7 +148,7 @@ def resolve_output_dimensions(
     long_edge: int = 848,
     fixed_width: int = 832,
     fixed_height: int = 480,
-    stride: int = 16,
+    stride: int = H3_SPATIAL_STRIDE,
 ) -> tuple[int, int, int, str]:
     """Return (width, height, ref_max_size, mode) for MiniMax H3 Motion Director output."""
     mode = (mode or "long_edge").lower()

@@ -262,12 +262,12 @@ test("legacy workflow values insert Color Re-anchor false without shifting later
     assert.equal(migrateColorReanchorWidgetValues(legacy, currentWidgets), false);
 });
 
-test("frontend mirrors task-aware H3 conditioning stride without globally forcing 32", () => {
+test("frontend uses a global 32-pixel H3 canvas for every task", () => {
     assert.equal(resolveH3SpatialStride({
         taskKey: "i2v",
         segmentCount: 1,
         motionContextEnabled: false,
-    }), 16);
+    }), 32);
     assert.equal(resolveH3SpatialStride({
         taskKey: "i2v",
         segmentCount: 3,
@@ -278,7 +278,7 @@ test("frontend mirrors task-aware H3 conditioning stride without globally forcin
         segmentCount: 1,
         motionContextEnabled: false,
         hasReferenceVideo: false,
-    }), 16);
+    }), 32);
     assert.equal(resolveH3SpatialStride({
         taskKey: "r2v",
         segmentCount: 1,

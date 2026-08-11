@@ -25,9 +25,8 @@ if inserted_patches_stub:
     sys.modules.pop(patches_name, None)
 
 
-def test_stride_32_snaps_656x864_to_640x864_while_stride_16_remains_legal():
+def test_global_stride_32_snaps_656x864_to_640x864():
     assert prep.resolve_h3_canvas(656, 864, stride=32) == (640, 864)
-    assert prep.resolve_h3_canvas(656, 864, stride=16) == (656, 864)
     assert prep.resolve_output_dimensions(
         656,
         864,
@@ -40,19 +39,19 @@ def test_stride_32_snaps_656x864_to_640x864_while_stride_16_remains_legal():
 @pytest.mark.parametrize(
     "kwargs,expected",
     [
-        ({"task_key": "i2v", "segment_count": 1, "motion_context_enabled": False}, 16),
+        ({"task_key": "i2v", "segment_count": 1, "motion_context_enabled": False}, 32),
         ({"task_key": "i2v", "segment_count": 3, "motion_context_enabled": True}, 32),
-        ({"task_key": "r2v", "segment_count": 3, "motion_context_enabled": False}, 16),
+        ({"task_key": "r2v", "segment_count": 3, "motion_context_enabled": False}, 32),
         ({"task_key": "r2v", "segment_count": 3, "motion_context_enabled": True}, 32),
         ({"task_key": "r2v", "segment_count": 1, "has_reference_video": True}, 32),
         ({"task_key": "v2v", "segment_count": 1, "motion_context_enabled": False}, 32),
         ({"task_key": "rv2v", "segment_count": 1, "motion_context_enabled": False}, 32),
         ({"task_key": "v2v", "segment_count": 2, "source_bridge_frames": 5}, 32),
-        ({"task_key": "t2v", "segment_count": 1, "motion_context_enabled": False}, 16),
+        ({"task_key": "t2v", "segment_count": 1, "motion_context_enabled": False}, 32),
         ({"task_key": "t2v", "segment_count": 2, "motion_context_enabled": True}, 32),
     ],
 )
-def test_task_and_path_aware_h3_spatial_stride(kwargs, expected):
+def test_all_h3_tasks_use_global_spatial_stride_32(kwargs, expected):
     assert prep.resolve_h3_spatial_stride(**kwargs) == expected
 
 
