@@ -33,6 +33,17 @@ from .fl2v_timeline import (
     reinforce_fl2v_prompt,
 )
 from .frame_align import minimax_align_frame_count
+from .effective_refs import (
+    compile_effective_references,
+    compile_semantic_prompt,
+    concat_common_prompt,
+)
+from .gen_timeline import (
+    _assert_effective_ref_limits,
+    _known_assets,
+    _paired_video_audio_entries,
+    _raw_asset_id,
+)
 
 log = logging.getLogger("ComfyUI-MiniMax-H3-Motion-Director.director.external_groups")
 
@@ -345,17 +356,6 @@ def validate_external_group_inputs(
     for g in r2v:
         if g.get("kind") != "r2v":
             raise ValueError(f"r2v_groups contains a non-r2v group (kind={g.get('kind')!r}).")
-    if motion_context_enabled:
-        first = r2v[0]
-        if not any(
-            first.get(key)
-            for key in ("ref_images", "ref_videos", "ref_video_audios", "ref_audios")
-        ):
-            raise ValueError(
-                "MiniMax H3 Motion Director:\n"
-                "R2V Motion Context sequence requires an initial reference set on Segment 1.\n"
-                "Later segments may inherit it automatically."
-            )
     return task_key, r2v, "r2v"
 
 
@@ -379,6 +379,9 @@ def build_plan_from_external_groups(
         SegmentRef,
         SegmentRefAudio,
         SegmentRefVideo,
+        _load_ref_audios,
+        _load_ref_videos,
+        _load_refs,
         reinforce_r2v_prompt,
     )
 
@@ -387,13 +390,26 @@ def build_plan_from_external_groups(
     task_key = resolve_task_key(task_type)
     label = task_type_option_label(TASK_PROMPT_BY_KEY.get(task_key) or TASK_PROMPT_BY_KEY["t2v"])
     task_label = task_type or label
-    fallback_prompt = (
-        ((timeline.get("global") or {}).get("prompt") or global_prompt or "")
-    ).strip()
+    global_block = timeline.get("global") or {}
+    fallback_prompt = ((global_block.get("prompt") or global_prompt or "")).strip()
+    common_picture_raw = list(global_block.get("refs") or [])
+    common_video_raw = list(
+        global_block.get("refVideos") or global_block.get("ref_videos") or []
+    )
+    common_audio_raw = list(
+        global_block.get("refAudios") or global_block.get("ref_audios") or []
+    )
+    common_pictures_raw_loaded = _load_refs(common_picture_raw) if family == "r2v" else []
+    common_known_assets = _known_assets(
+        ("picture", common_picture_raw),
+        ("video", common_video_raw),
+        ("audio", common_audio_raw),
+    )
     timeline_segments = list(timeline.get("segments") or [])
     inheritance_active = bool(
         motion_context_enabled
-        and ((family == "i2v" and task_key == "i2v") or family == "r2v")
+        and family == "i2v"
+        and task_key == "i2v"
     )
     planned_count = (
         max(len(groups), len(timeline_segments))
@@ -429,17 +445,17 @@ def build_plan_from_external_groups(
     )
 
     segments: list[SegmentPlan] = []
-    last_r2v_bundle = None
-    last_r2v_source_index: int | None = None
     cursor = 0
     for plan_idx, src_index in enumerate(range(planned_count)):
         g = groups[src_index] if src_index < len(groups) else None
         seg_data = timeline_segments[src_index] if src_index < len(timeline_segments) else {}
         if g is not None:
-            prompt = (g.get("prompt") or "").strip() or fallback_prompt
+            local_prompt = (g.get("prompt") or "").strip()
+            prompt = local_prompt or fallback_prompt
             raw_duration = g.get("duration_sec")
         else:
-            prompt = (seg_data.get("prompt") or "").strip() or fallback_prompt
+            local_prompt = (seg_data.get("prompt") or "").strip()
+            prompt = local_prompt or fallback_prompt
             raw_duration = seg_data.get("durationSec") or seg_data.get("duration_sec")
             if raw_duration is None:
                 raw_frames = seg_data.get("frameCount") or seg_data.get("frame_count") or seg_data.get("length")
@@ -543,55 +559,153 @@ def build_plan_from_external_groups(
             ref_videos: list[SegmentRefVideo] = []
             ref_audios: list[SegmentRefAudio] = []
             ref_video_audios: list[SegmentRefAudio] = []
+            local_picture_raw = list(seg_data.get("refs") or [])
+            local_video_raw = list(
+                seg_data.get("refVideos") or seg_data.get("ref_videos") or []
+            )
+            local_audio_raw = list(
+                seg_data.get("refAudios") or seg_data.get("ref_audios") or []
+            )
+
+            def local_asset_id(kind: str, slot: int) -> str:
+                source = {
+                    "picture": local_picture_raw,
+                    "video": local_video_raw,
+                    "audio": local_audio_raw,
+                }[kind]
+                raw_item = next(
+                    (
+                        item
+                        for item in source
+                        if isinstance(item, dict)
+                        and int(item.get("index", item.get("slot", -1))) == int(slot)
+                    ),
+                    None,
+                )
+                if raw_item is not None:
+                    return _raw_asset_id(raw_item, kind, int(slot))
+                return f"external-{kind}-{src_index}-{int(slot)}"
+
             if g is not None:
                 for idx, tensor in sorted((g.get("ref_images") or {}).items()):
                     fitted = _fit_image(
                         tensor, width=seg_w, height=seg_h, output_mode=seg_mode, ref_max_size=ref_max
                     )
-                    refs.append(SegmentRef(index=int(idx), tensor=fitted[:1].clone()))
+                    refs.append(
+                        SegmentRef(
+                            index=int(idx),
+                            tensor=fitted[:1].clone(),
+                            asset_id=local_asset_id("picture", int(idx)),
+                        )
+                    )
                 for idx, frames in sorted((g.get("ref_videos") or {}).items()):
                     fitted = _fit_image(
                         frames, width=seg_w, height=seg_h, output_mode=seg_mode, ref_max_size=ref_max
                     )
                     ref_videos.append(
-                        SegmentRefVideo(index=int(idx), tensor=fitted.clone(), video_file="", meta={"external": True})
+                        SegmentRefVideo(
+                            index=int(idx),
+                            tensor=fitted.clone(),
+                            video_file="",
+                            meta={"external": True},
+                            asset_id=local_asset_id("video", int(idx)),
+                        )
                     )
                 ref_audios = [
-                    SegmentRefAudio(index=int(idx), audio=aud, audio_file="")
+                    SegmentRefAudio(
+                        index=int(idx),
+                        audio=aud,
+                        audio_file="",
+                        asset_id=local_asset_id("audio", int(idx)),
+                    )
                     for idx, aud in sorted((g.get("ref_audios") or {}).items())
                 ]
                 ref_video_audios = [
-                    SegmentRefAudio(index=int(idx), audio=aud, audio_file="")
+                    SegmentRefAudio(
+                        index=int(idx),
+                        audio=aud,
+                        audio_file="",
+                        asset_id=local_asset_id("video", int(idx)),
+                    )
                     for idx, aud in sorted((g.get("ref_video_audios") or {}).items())
                 ]
 
-            material_source_index = src_index
-            material_inherited = False
-            has_material = bool(refs or ref_videos or ref_audios or ref_video_audios)
-            if inheritance_active:
-                if has_material:
-                    last_r2v_bundle = (
-                        list(refs), list(ref_audios),
-                        list(ref_videos), list(ref_video_audios),
+            selected_raw = seg_data.get("commonAssetIds")
+            if selected_raw is None:
+                selected_raw = seg_data.get("common_asset_ids")
+            if selected_raw is None:
+                selected_raw = [
+                    _raw_asset_id(item, kind, pos)
+                    for kind, items in (
+                        ("picture", common_picture_raw),
+                        ("video", common_video_raw),
+                        ("audio", common_audio_raw),
                     )
-                    last_r2v_source_index = src_index
-                elif src_index == 0 or last_r2v_bundle is None:
-                    raise ValueError(
-                        "MiniMax H3 Motion Director:\n"
-                        "R2V Motion Context sequence requires an initial reference set on Segment 1.\n"
-                        "Later segments may inherit it automatically."
+                    for pos, item in enumerate(items)
+                    if isinstance(item, dict)
+                ]
+            selected_common_ids = {str(value) for value in (selected_raw or [])}
+            use_common_prompt_raw = seg_data.get("useCommonPrompt")
+            if use_common_prompt_raw is None:
+                use_common_prompt_raw = seg_data.get("use_common_prompt", True)
+
+            common_pictures: list[SegmentRef] = []
+            for item in common_pictures_raw_loaded:
+                fitted = _fit_image(
+                    item.tensor,
+                    width=seg_w,
+                    height=seg_h,
+                    output_mode=seg_mode,
+                    ref_max_size=ref_max,
+                )
+                common_pictures.append(
+                    SegmentRef(
+                        index=int(item.index),
+                        tensor=fitted[:1].clone(),
+                        asset_id=item.asset_id,
                     )
-                else:
-                    refs, ref_audios, ref_videos, ref_video_audios = (
-                        list(items) for items in last_r2v_bundle
-                    )
-                    material_source_index = last_r2v_source_index
-                    material_inherited = True
+                )
+            common_videos = _load_ref_videos(common_video_raw, timeline, fc)
+            common_audios = _load_ref_audios(common_audio_raw)
+            common_video_audios = _load_ref_audios(
+                _paired_video_audio_entries(common_video_raw)
+            )
+            effective = compile_effective_references(
+                common_pictures=common_pictures,
+                common_videos=common_videos,
+                common_audios=common_audios,
+                common_video_audios=common_video_audios,
+                selected_common_asset_ids=selected_common_ids,
+                local_pictures=refs,
+                local_videos=ref_videos,
+                local_audios=ref_audios,
+                local_video_audios=ref_video_audios,
+            )
+            _assert_effective_ref_limits(effective, segment_index=src_index)
+            refs = effective.pictures
+            ref_videos = effective.videos
+            ref_audios = effective.audios
+            ref_video_audios = effective.video_audios
+            prompt = concat_common_prompt(
+                fallback_prompt,
+                local_prompt,
+                use_common_prompt=bool(use_common_prompt_raw),
+            )
+            prompt = compile_semantic_prompt(
+                prompt,
+                effective.tags,
+                known_assets=common_known_assets,
+                segment_label=f"Segment {src_index + 1}",
+            )
             prompt = reinforce_r2v_prompt(
                 prompt,
                 ref_indices=[r.index for r in refs],
                 video_indices=[v.index for v in ref_videos],
-                audio_indices=[a.index for a in ref_audios],
+                audio_indices=[
+                    int(tag.removeprefix("<Audio ").removesuffix(">")) - 1
+                    for (kind, _asset_id), tag in effective.tags.items()
+                    if kind == "audio" and tag.startswith("<Audio ") and tag.endswith(">")
+                ],
             )
             segments.append(
                 SegmentPlan(
@@ -608,8 +722,7 @@ def build_plan_from_external_groups(
                     ref_video_audios=ref_video_audios,
                     source_clip=None,
                     ui_index=int(src_index),
-                    material_source_index=material_source_index,
-                    material_inherited=material_inherited,
+                    reference_tags=effective.tags,
                 )
             )
 

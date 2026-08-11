@@ -88,6 +88,7 @@ import {
     updateFl2vToolbarBtns,
 } from "./minimax_fl2v.js";
 import { mountPromptImageMentions } from "./minimax_prompt_mentions.js";
+import { ensureReferenceAssetSchema } from "./minimax_reference_assets.mjs";
 import {
     VIDEO_CONTINUITY_STRATEGIES,
     applyVideoStrategyToWidgets,
@@ -178,6 +179,7 @@ function sanitizeRefImage(ref) {
     const index = Number(ref.index ?? ref.slot);
     return {
         index: Number.isFinite(index) ? index : 0,
+        assetId: ref.assetId || ref.asset_id || "",
         imageFile: ref.imageFile || "",
         fileName: ref.fileName || "",
         type: ref.type || "input",
@@ -190,6 +192,7 @@ function sanitizeRefAudio(ref) {
     const index = Number(ref.index ?? ref.slot);
     return {
         index: Number.isFinite(index) ? index : 0,
+        assetId: ref.assetId || ref.asset_id || "",
         audioFile: ref.audioFile || "",
         fileName: ref.fileName || "",
         type: ref.type || "input",
@@ -203,6 +206,7 @@ function sanitizeRefVideo(ref) {
     const index = Number(ref.index ?? ref.slot);
     return {
         index: Number.isFinite(index) ? index : 0,
+        assetId: ref.assetId || ref.asset_id || "",
         videoFile: ref.videoFile || "",
         fileName: ref.fileName || "",
         type: ref.type || "input",
@@ -259,6 +263,9 @@ function stripTimelineEphemeralFields(timeline) {
                 : [],
             refAudios: Array.isArray(timeline.global.refAudios)
                 ? timeline.global.refAudios.map(sanitizeRefAudio)
+                : [],
+            refVideos: Array.isArray(timeline.global.refVideos)
+                ? timeline.global.refVideos.map(sanitizeRefVideo)
                 : [],
             referenceVideo: timeline.global.referenceVideo
                 ? {
@@ -920,7 +927,7 @@ const STYLES = `
 .bd-smart-split-msg.ok{color:#8c8}
 .bd-external-groups-msg{width:100%;box-sizing:border-box;font-size:11px;line-height:1.45;color:#9ad;padding:8px 10px;margin:0 0 4px;background:#152018;border:1px solid #2f4a38;border-radius:6px}
 .bd-external-groups-msg.hidden{display:none!important}
-.bd-wrap.bd-external-groups .bd-batch-card,.bd-wrap.bd-external-groups .bd-fl2v-shot{opacity:.48;pointer-events:none}
+.bd-wrap.bd-external-groups .bd-batch-card:not(.bd-r2v-common-card),.bd-wrap.bd-external-groups .bd-fl2v-shot{opacity:.48;pointer-events:none}
 .bd-wrap.bd-external-groups .bd-run-select-bar,.bd-wrap.bd-external-groups .bd-batch-run-check,.bd-wrap.bd-external-groups .bd-run-select-all-wrap{pointer-events:auto;opacity:1}
 .bd-wrap.bd-external-groups .bd-batch-card .bd-batch-run-check{pointer-events:auto;opacity:1}
 /* External mode: duration/delete stay non-interactive; allow media preview playback. */
@@ -1528,7 +1535,7 @@ function parseTimeline(raw, totalFrames, fps) {
             frameMap: [],
         },
         videoClips: [],
-        global: { taskType: "", prompt: "", refs: [], refAudios: [], referenceVideo: {}, continuousReference: false },
+        global: { taskType: "", prompt: "", refs: [], refAudios: [], refVideos: [], referenceVideo: {}, continuousReference: false },
         output: {
             // v2v/rv2v default: scale by long edge (preserve aspect). Fixed = center-crop.
             mode: "long_edge",
@@ -1561,6 +1568,7 @@ function parseTimeline(raw, totalFrames, fps) {
         data.global = data.global || { refs: [], refAudios: [], referenceVideo: {}, continuousReference: false };
         data.global.refs = data.global.refs || [];
         data.global.refAudios = data.global.refAudios || data.global.ref_audios || [];
+        data.global.refVideos = data.global.refVideos || data.global.ref_videos || [];
         data.global.referenceVideo = data.global.referenceVideo || data.global.reference_video || {};
         data.global.continuousReference = !!data.global.continuousReference || !!data.global.continuous_reference;
         const legacyRef = data.referenceVideo || data.reference_video;
@@ -1616,10 +1624,12 @@ function parseTimeline(raw, totalFrames, fps) {
             if (seg.frameCount == null && seg.length != null) seg.frameCount = seg.length;
             seg.refs = seg.refs || [];
             seg.refAudios = seg.refAudios || seg.ref_audios || [];
+            seg.refVideos = seg.refVideos || seg.ref_videos || [];
             seg.referenceVideo = seg.referenceVideo || seg.reference_video || {};
             seg.genImage = seg.genImage || { imageFile: seg.imageFile || "" };
             seg.negativePrompt = seg.negativePrompt ?? "";
         }
+        ensureReferenceAssetSchema(data);
         data.gen = data.gen || { defaultFrameCount: 124 };
         if (data.global) {
             data.global.genImage = data.global.genImage || { imageFile: data.global.imageFile || "" };
@@ -1869,7 +1879,7 @@ class MiniMaxH3MotionDirectorEditor {
         const taskKey = resolveTaskKey(this.getTaskKey?.() || this.taskTypeWidget?.value);
         const motionInheritance = !!(
             this.isMotionContextEnabled?.()
-            && (taskKey === "i2v" || taskKey === "r2v")
+            && taskKey === "i2v"
         );
         const sig = JSON.stringify([motionInheritance, (this.timeline.segments || []).length, specs.map((s) => [
             Number(s.durationSec) || 0,
@@ -1941,6 +1951,7 @@ class MiniMaxH3MotionDirectorEditor {
                 const refs = isR2v
                     ? (spec.refImages || []).map((r) => ({
                         index: r.index,
+                        assetId: (prev[i]?.refs || []).find((x) => Number(x.index ?? x.slot) === Number(r.index))?.assetId || "",
                         imageFile: r.imageFile || "",
                         imageB64: "",
                     }))
@@ -1948,6 +1959,7 @@ class MiniMaxH3MotionDirectorEditor {
                 const refVideos = isR2v
                     ? (spec.refVideos || []).map((r) => ({
                         index: r.index,
+                        assetId: (prev[i]?.refVideos || []).find((x) => Number(x.index ?? x.slot) === Number(r.index))?.assetId || "",
                         videoFile: r.videoFile || "",
                         fileName: r.fileName || "",
                         type: r.type || "input",
@@ -1961,6 +1973,7 @@ class MiniMaxH3MotionDirectorEditor {
                 const refAudios = isR2v
                     ? (spec.refAudios || []).map((r) => ({
                         index: r.index,
+                        assetId: (prev[i]?.refAudios || []).find((x) => Number(x.index ?? x.slot) === Number(r.index))?.assetId || "",
                         audioFile: r.audioFile || "",
                         fileName: r.fileName || "",
                         type: r.type || "input",
@@ -1981,6 +1994,7 @@ class MiniMaxH3MotionDirectorEditor {
                 });
             });
             normalizeImageBatchSegments(this);
+            ensureReferenceAssetSchema(this.timeline);
             this.selectedIndex = Math.min(this.selectedIndex ?? 0, Math.max(0, this.timeline.segments.length - 1));
             this.renderImageBatchGroups?.();
             this.scheduleRender?.();

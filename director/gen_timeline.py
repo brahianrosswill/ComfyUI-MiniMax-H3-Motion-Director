@@ -15,6 +15,11 @@ import torch
 
 from ..lib.image_prep import fit_canvas, fit_video_long_edge, cat_frames_variable_size, resolve_output_dimensions
 from ..lib.task_prompts import resolve_task_key
+from .effective_refs import (
+    compile_effective_references,
+    compile_semantic_prompt,
+    concat_common_prompt,
+)
 
 log = logging.getLogger("ComfyUI-MiniMax-H3-Motion-Director.director.gen")
 
@@ -295,9 +300,57 @@ def _paired_video_audio_entries(video_list: list[dict]) -> list[dict]:
             {
                 "index": int(item.get("index", item.get("slot", len(out)))),
                 "audioFile": path,
+                # A Video and its paired soundtrack are one selectable asset.
+                "assetId": str(
+                    item.get("assetId")
+                    or item.get("asset_id")
+                    or item.get("id")
+                    or f"video-{int(item.get('index', item.get('slot', len(out))))}"
+                ),
             }
         )
     return out
+
+
+def _raw_asset_id(item: dict, kind: str, index: int) -> str:
+    return str(
+        item.get("assetId")
+        or item.get("asset_id")
+        or item.get("id")
+        or f"{kind}-{index}"
+    )
+
+
+def _known_assets(*asset_lists: tuple[str, list[dict]]) -> dict[tuple[str, str], str]:
+    known: dict[tuple[str, str], str] = {}
+    for kind, items in asset_lists:
+        for ordinal, item in enumerate(items or []):
+            if not isinstance(item, dict):
+                continue
+            asset_id = _raw_asset_id(item, kind, ordinal)
+            label = str(item.get("name") or item.get("label") or asset_id)
+            pretty = {"picture": "Picture", "video": "Video", "audio": "Audio"}[kind]
+            known[(kind, asset_id)] = f'Common {pretty} "{label}"'
+            if kind == "video" and (
+                item.get("pairedAudioFile") or item.get("paired_audio_file")
+            ):
+                known[("audio", asset_id)] = f'Common Video soundtrack "{label}"'
+    return known
+
+
+def _assert_effective_ref_limits(effective, *, segment_index: int) -> None:
+    counts = {
+        "Picture": (len(effective.pictures), 9),
+        "Video": (len(effective.videos), 3),
+        # Official standalone input max is three; paired soundtracks are tied to Videos.
+        "standalone Audio": (len(effective.audios), 3),
+    }
+    for label, (actual, limit) in counts.items():
+        if actual > limit:
+            raise ValueError(
+                f"Segment {segment_index + 1} has {actual} effective {label} references; "
+                f"MiniMax H3 allows at most {limit}. Disable Common assets or remove Local assets."
+            )
 
 
 def build_gen_director_plan(
@@ -340,6 +393,18 @@ def build_gen_director_plan(
     submode = gen_submode(timeline, task_key)
     prompt = global_block.get("prompt") or global_prompt or ""
     global_refs = _load_refs(global_block.get("refs") or [])
+    common_picture_raw = list(global_block.get("refs") or [])
+    common_video_raw = list(
+        global_block.get("refVideos") or global_block.get("ref_videos") or []
+    )
+    common_audio_raw = list(
+        global_block.get("refAudios") or global_block.get("ref_audios") or []
+    )
+    common_known_assets = _known_assets(
+        ("picture", common_picture_raw),
+        ("video", common_video_raw),
+        ("audio", common_audio_raw),
+    )
 
     output_block = timeline.get("output") or {}
     gen_block = timeline.get("gen") or {}
@@ -409,8 +474,6 @@ def build_gen_director_plan(
         )
 
     segments: list[SegmentPlan] = []
-    last_r2v_bundle = None
-    last_r2v_source_index: int | None = None
     for idx, (start, end, seg_data) in enumerate(segment_ranges):
         if edit_mode == "global":
             seg_prompt = prompt
@@ -420,9 +483,11 @@ def build_gen_director_plan(
             seg_negative = ""
         else:
             use_global = False
-            seg_prompt = (seg_data.get("prompt") or "").strip() or prompt
+            local_prompt = (seg_data.get("prompt") or "").strip()
+            seg_prompt = local_prompt or prompt
             seg_task = seg_data.get("taskType") or seg_data.get("task_type") or task_type
-            # Segment / batch mode: only this group's refs; never inherit global.refs.
+            # Local references belong only to this segment.  Common references
+            # are selected explicitly after task resolution below.
             seg_refs = _load_refs(seg_data.get("refs") or [])
             seg_negative = (
                 (seg_data.get("negativePrompt") or seg_data.get("negative_prompt") or "").strip()
@@ -439,6 +504,7 @@ def build_gen_director_plan(
         seg_ref_audios = []
         seg_ref_videos = []
         seg_ref_video_audios = []
+        reference_tags: dict[tuple[str, str], str] = {}
         if edit_mode == "global":
             seg_ref_audios = segment_ref_audios_for_context(
                 seg_task_key,
@@ -458,42 +524,77 @@ def build_gen_director_plan(
                     if not any(int(v.get("index", v.get("slot", -1))) == 0 for v in raw_vids if isinstance(v, dict)):
                         raw_vids = [{"index": 0, **legacy}, *list(raw_vids or [])]
                 seg_ref_videos = _load_ref_videos(raw_vids, timeline, seg_len)
-                if motion_context_enabled:
-                    seg_ref_video_audios = _load_ref_audios(
-                        _paired_video_audio_entries(list(raw_vids or []))
-                    )
+                seg_ref_video_audios = _load_ref_audios(
+                    _paired_video_audio_entries(list(raw_vids or []))
+                )
 
-        material_source_index = None
-        material_inherited = False
+        if edit_mode != "global" and seg_task_key == "r2v":
+            selected_raw = seg_data.get("commonAssetIds")
+            if selected_raw is None:
+                selected_raw = seg_data.get("common_asset_ids")
+            if selected_raw is None:
+                # New R2V segments default to all assets currently in the pool.
+                selected_raw = [
+                    _raw_asset_id(item, kind, pos)
+                    for kind, items in (
+                        ("picture", common_picture_raw),
+                        ("video", common_video_raw),
+                        ("audio", common_audio_raw),
+                    )
+                    for pos, item in enumerate(items)
+                    if isinstance(item, dict)
+                ]
+            selected_common_ids = {str(value) for value in (selected_raw or [])}
+            use_common_prompt_raw = seg_data.get("useCommonPrompt")
+            if use_common_prompt_raw is None:
+                use_common_prompt_raw = seg_data.get("use_common_prompt", True)
+            use_common_prompt = bool(use_common_prompt_raw)
+
+            local_refs = list(seg_refs)
+            local_audios = list(seg_ref_audios)
+            local_videos = list(seg_ref_videos)
+            local_video_audios = list(seg_ref_video_audios)
+
+            seg_len = max(5, int(end) - int(start))
+            common_videos = _load_ref_videos(common_video_raw, timeline, seg_len)
+            common_video_audios = _load_ref_audios(
+                _paired_video_audio_entries(common_video_raw)
+            )
+            common_audios = segment_ref_audios_for_context(
+                seg_task_key, _load_ref_audios(common_audio_raw)
+            )
+            effective = compile_effective_references(
+                common_pictures=global_refs,
+                common_videos=common_videos,
+                common_audios=common_audios,
+                common_video_audios=common_video_audios,
+                selected_common_asset_ids=selected_common_ids,
+                local_pictures=local_refs,
+                local_videos=local_videos,
+                local_audios=local_audios,
+                local_video_audios=local_video_audios,
+            )
+            _assert_effective_ref_limits(effective, segment_index=idx)
+            seg_refs = effective.pictures
+            seg_ref_videos = effective.videos
+            seg_ref_audios = effective.audios
+            seg_ref_video_audios = effective.video_audios
+            reference_tags = effective.tags
+            seg_prompt = concat_common_prompt(
+                prompt,
+                local_prompt,
+                use_common_prompt=use_common_prompt,
+            )
+            seg_prompt = compile_semantic_prompt(
+                seg_prompt,
+                reference_tags,
+                known_assets=common_known_assets,
+                segment_label=f"Segment {idx + 1}",
+            )
+
         has_r2v_material = bool(
             seg_refs or seg_ref_videos or seg_ref_audios or seg_ref_video_audios
         )
-        if motion_context_enabled and seg_task_key == "r2v":
-            if has_r2v_material:
-                last_r2v_bundle = (
-                    list(seg_refs),
-                    list(seg_ref_audios),
-                    list(seg_ref_videos),
-                    list(seg_ref_video_audios),
-                )
-                last_r2v_source_index = idx
-                material_source_index = idx
-            elif idx == 0 or last_r2v_bundle is None:
-                raise ValueError(
-                    "MiniMax H3 Motion Director:\n"
-                    "R2V Motion Context sequence requires an initial reference set on Segment 1.\n"
-                    "Later segments may inherit it automatically."
-                )
-            else:
-                (
-                    seg_refs,
-                    seg_ref_audios,
-                    seg_ref_videos,
-                    seg_ref_video_audios,
-                ) = (list(items) for items in last_r2v_bundle)
-                material_source_index = last_r2v_source_index
-                material_inherited = True
-                has_r2v_material = True
 
         if seg_task_key in ("r2v", "r2i") and not has_r2v_material:
             log.warning(
@@ -520,8 +621,7 @@ def build_gen_director_plan(
                 ref_video_audios=seg_ref_video_audios,
                 negative_prompt=seg_negative,
                 source_clip=seg_source,
-                material_source_index=material_source_index,
-                material_inherited=material_inherited,
+                reference_tags=reference_tags,
             )
         )
 

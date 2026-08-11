@@ -26,8 +26,6 @@ def _segment(index: int, start: int, end: int, task_key: str):
         ref_video_audios=[],
         reference_video_meta={},
         reference_video_start_frame=0,
-        material_source_index=None,
-        material_inherited=False,
     )
 
 

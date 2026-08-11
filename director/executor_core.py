@@ -548,17 +548,12 @@ def execute_director_plan_core(
                     f"Segment {timeline_slot + 1}: I2V explicit source image."
                 )
         elif motion_enabled and seg.task_key == "r2v":
-            source_index = getattr(seg, "material_source_index", None)
-            if getattr(seg, "material_inherited", False) and source_index is not None:
-                reports.append(
-                    f"Segment {timeline_slot + 1}: inherited Reference Set "
-                    f"from Segment {int(source_index) + 1}."
-                )
-            else:
-                qualifier = "new " if timeline_slot > 0 else ""
-                reports.append(
-                    f"Segment {timeline_slot + 1}: explicit {qualifier}Reference Set."
-                )
+            reports.append(
+                f"Segment {timeline_slot + 1}: effective Reference Set = "
+                f"{len(seg.refs or [])} Picture, "
+                f"{len(getattr(seg, 'ref_videos', None) or [])} Video, "
+                f"{len(seg.ref_audios or [])} standalone Audio."
+            )
 
         if i2v_continuation:
             # A continuation has no new raw source by design. Do not ask the
@@ -741,7 +736,20 @@ def execute_director_plan_core(
         elif seg.task_key == "r2v":
             ref_idxs = [int(getattr(r, "index", 0)) for r in (seg.refs or []) if r is not None]
             vid_idxs = [int(getattr(v, "index", 0)) for v in (getattr(seg, "ref_videos", None) or []) if v is not None]
-            audio_idxs = [int(getattr(a, "index", 0)) for a in (seg.ref_audios or []) if a is not None]
+            semantic_audio_tags = [
+                value
+                for (kind, _asset_id), value in (getattr(seg, "reference_tags", None) or {}).items()
+                if kind == "audio"
+            ]
+            audio_idxs = [
+                int(tag.removeprefix("<Audio ").removesuffix(">")) - 1
+                for tag in semantic_audio_tags
+                if tag.startswith("<Audio ") and tag.endswith(">")
+            ] or [
+                int(getattr(a, "index", 0))
+                for a in (seg.ref_audios or [])
+                if a is not None
+            ]
             positive_prompt = reinforce_r2v_prompt(
                 positive_prompt,
                 ref_indices=ref_idxs,

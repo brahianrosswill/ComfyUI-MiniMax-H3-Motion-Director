@@ -53,6 +53,7 @@ MAX_CONTINUITY_OVERLAP = 81
 class SegmentRef:
     index: int
     tensor: torch.Tensor
+    asset_id: str = ""
 
 
 @dataclass
@@ -62,6 +63,7 @@ class SegmentRefAudio:
     index: int
     audio: dict  # ComfyUI AUDIO: {waveform, sample_rate}
     audio_file: str = ""
+    asset_id: str = ""
 
 
 @dataclass
@@ -72,6 +74,7 @@ class SegmentRefVideo:
     tensor: torch.Tensor
     video_file: str = ""
     meta: dict = field(default_factory=dict)
+    asset_id: str = ""
 
 
 @dataclass
@@ -94,11 +97,8 @@ class SegmentPlan:
     # When external groups filter by「选择运行」, plan.index is the compact run
     # order (0..N-1) while ui_index keeps the Director timeline card index.
     ui_index: int | None = None
-    # Runtime-only provenance for Motion Context media inheritance. This is not
-    # written back into timeline_data; the effective tensors above remain the
-    # cache identity source.
-    material_source_index: int | None = None
-    material_inherited: bool = False
+    # Semantic asset identity → official per-segment prompt tag.
+    reference_tags: dict[tuple[str, str], str] = field(default_factory=dict)
 
     @property
     def frame_count(self) -> int:
@@ -227,7 +227,18 @@ def _load_refs(ref_list: list[dict]) -> list[SegmentRef]:
             continue
         tensor = load_reference_tensor(item)
         if tensor is not None:
-            refs.append(SegmentRef(index=index, tensor=tensor))
+            refs.append(
+                SegmentRef(
+                    index=index,
+                    tensor=tensor,
+                    asset_id=str(
+                        item.get("assetId")
+                        or item.get("asset_id")
+                        or item.get("id")
+                        or f"picture-{index}"
+                    ),
+                )
+            )
     return sorted(refs, key=lambda r: r.index)
 
 
@@ -267,7 +278,19 @@ def _load_ref_audios(audio_list: list[dict]) -> list[SegmentRefAudio]:
         if audio is None:
             continue
         rel = str(item.get("audioFile") or item.get("audio_file") or item.get("fileName") or "").strip()
-        out.append(SegmentRefAudio(index=index, audio=audio, audio_file=rel))
+        out.append(
+            SegmentRefAudio(
+                index=index,
+                audio=audio,
+                audio_file=rel,
+                asset_id=str(
+                    item.get("assetId")
+                    or item.get("asset_id")
+                    or item.get("id")
+                    or f"audio-{index}"
+                ),
+            )
+        )
     return sorted(out, key=lambda a: a.index)
 
 
@@ -309,7 +332,20 @@ def _load_ref_videos(
         if tensor is None or tensor.numel() <= 0:
             continue
         rel = str(item.get("videoFile") or item.get("fileName") or "").strip()
-        out.append(SegmentRefVideo(index=index, tensor=tensor, video_file=rel, meta=dict(item)))
+        out.append(
+            SegmentRefVideo(
+                index=index,
+                tensor=tensor,
+                video_file=rel,
+                meta=dict(item),
+                asset_id=str(
+                    item.get("assetId")
+                    or item.get("asset_id")
+                    or item.get("id")
+                    or f"video-{index}"
+                ),
+            )
+        )
     return sorted(out, key=lambda v: v.index)
 
 
