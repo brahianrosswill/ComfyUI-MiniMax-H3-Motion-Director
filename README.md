@@ -15,17 +15,21 @@
 - 在节点内编辑多段时间轴、分段提示词与参考素材。
 - 支持完整序列生成、勾选分段运行、全部导出和分段导出。
 - 支持模型内部采样，也支持外接标准 `SAMPLER` + `SIGMAS`。
-- 使用 Motion Context 延续上一段生成的视频状态与模型生成音频。
+- R2V 提供可复用的 `Common Asset Pool`，每段再叠加自己的 Local 素材；不再隐式继承上一段素材。
+- 提示词中的图片、视频、音频引用使用可视化 Prompt chip，素材勾选变化后会自动重新编号。
+- 使用 latent-first Motion Context 延续上一段生成的视频状态与模型生成音频，并保留像素缓存作为兼容 fallback。
 - 使用可选的 Color Re-anchor 降低长链生成中的累积性色彩漂移。
 - 为 V2V/RV2V 提供固定 5 帧的 H3 原生 Source Bridge。
-- 自动处理 MiniMax H3 的 `17k+5` 时间长度和 visual conditioning 的 32 像素空间网格。
+- External Groups 支持经过标准 Reroute、rgthree Reroute 与明确虚拟直通节点连接。
+- FL2V 支持首帧、首尾帧和仅尾帧三种官方 conditioning 形式。
+- 自动处理 MiniMax H3 的 `17k+5` 时间长度；所有任务统一使用 32 像素空间网格。
 - 节点 ID 独立，可与 AIMixer Director 同时安装。
 
 ## 当前测试状态
 
-仓库包含 Python 单元/运行时测试与 Node.js UI 测试，覆盖 Continuity UI、旧工作流迁移、Color Re-anchor、H3 空间对齐、Source Bridge、缓存与音频导出。提交前还会执行 Python `compileall` 和 ComfyUI loader smoke。
+仓库包含 Python 单元/运行时测试与 Node.js UI 测试，覆盖 Common/Local 有效参考集合、Prompt chip、latent-first Motion Context、Continuity UI、旧工作流迁移、全局 32 像素对齐、Source Bridge、Reroute、FL2V 仅尾帧、缓存与音频导出。提交前还会执行 Python `compileall` 和 ComfyUI loader smoke。
 
-作者已在本地使用真实 MiniMax H3 生成测试过 T2V、I2V，以及 RV2V 基础生成和续接对比。FL2V、R2V、V2V，以及本轮新增的 Color Re-anchor 与动态 32 像素对齐，仍需要更多真实 GPU 素材验证。自动测试通过只表示实现和回归检查完成，不代表所有素材都能获得相同的视觉改善。
+作者已在本地使用真实 MiniMax H3 生成测试过 T2V、I2V，以及 RV2V 基础生成和续接对比。FL2V、R2V、V2V，以及本轮新增的 Common 素材模型、latent-first handoff、全局 32 像素对齐、Reroute 与仅尾帧路径，仍需要更多真实 GPU 素材验证。自动测试通过只表示实现和回归检查完成，不代表所有素材都能获得相同的视觉改善。
 
 现有演示视频：
 
@@ -75,7 +79,7 @@ python\python.exe -m pip install -r ComfyUI\custom_nodes\ComfyUI-MiniMax-H3-Moti
 1. 连接 MiniMax H3 `MODEL`、video VAE、audio VAE 和 CLIP。
 2. 添加 `MiniMax H3 Motion Director`，选择任务模式。
 3. 在 Director 时间轴中建立一个或多个分段，并填写全局或分段提示词。
-4. 按任务上传图片、源视频或参考音频。
+4. R2V 可先把会重复使用的素材放进 `Common Asset Pool`，再为每段添加 Local 素材；其他任务按需要上传图片、源视频或参考音频。
 5. 多段任务按需要选择 Motion Context 或 Source Bridge。
 6. 不连接外部 `SAMPLER`/`SIGMAS` 时使用内部采样；两者都连接时自动切换到外接采样。
 7. Queue 工作流。`images` 与 `audio` 可继续连接到视频保存节点。
@@ -133,12 +137,38 @@ python\python.exe -m pip install -r ComfyUI\custom_nodes\ComfyUI-MiniMax-H3-Moti
 |---|---|---|
 | T2V | 仅用文字生成视频与音频。 | 使用 Motion Context 延续生成状态。 |
 | I2V | 每条连续链从一张初始图开始。 | 使用 Motion Context；后续显式新图会重置连续链。 |
-| FL2V | 使用首帧与尾帧锚点生成。 | 可使用 Motion Context，但 Color Re-anchor 第一版不支持此任务。 |
-| R2V | 使用 Picture、可选参考视频与参考音频控制主体/材质。 | 使用 Motion Context；只有 Picture 且 MC 关闭时不强制 32 像素网格。 |
+| FL2V | 可使用首帧、首尾帧或仅尾帧锚点生成；仅尾帧不会伪造首图。 | 可使用 Motion Context；显式尾端 anchor 会保留在可见输出末帧。 |
+| R2V | 每段有效素材按 `Common → Local` 编译成连续 Picture/Video/Audio 槽位。 | 使用 Motion Context；空 Local 组表示纯 Common 或纯场景，不表示继承上一段。 |
 | V2V | 当前分段的原始源视频作为 `<Video 1>`。 | Source Bridge 是 source-motion-first 的起始方案；Motion Context 是可选 fallback。 |
 | RV2V | 当前分段 `<Video 1>` 加 Picture/Audio/Video 参考。 | 与 V2V 相同，但还要遵守有效参考集合。 |
 
 `22` 是一般 generated continuation 的基线值，不是所有任务的统一推荐值。V2V/RV2V 的动作应优先服从当前 `<Video 1>`；使用 Motion Context 时，上下文越长越可能增强上一段生成状态并干扰当前原片动作。当前可把 `1` 帧视为保守 fallback 参考，但真实效果仍依素材而异。
+
+## R2V Common / Local 参考素材
+
+`Common Asset Pool` 用来保存会被多个 R2V 分段重复使用的 Picture、参考视频和参考音频。每个分段都有独立的 Common 勾选清单、`全选`、`全不选`、`使用 Common Prompt` 开关，以及自己的 Local 素材区。运行时会先读取该段勾选的 Common，再读取该段 Local，按 `Common → Local` 顺序压成没有空洞的官方槽位：`<Picture 1>`、`<Video 1>`、`<Audio 1>`……。
+
+例如 Common Pool 放入角色 A、B、C，Segment 1 的 Local 放入道具 D：
+
+```text
+Segment 1 effective refs：A、B、C、D
+官方标签：<Picture 1>、<Picture 2>、<Picture 3>、<Picture 4>
+```
+
+Segment 2 若取消全部 Common 且没有 Local，就是纯场景生成；它不会继承 Segment 1 的 A、B、C、D。Segment 3 若选择 A、B、C，并上传 Local E，则有效集合是 A、B、C、E。外接 R2V Group 也使用 Director 内同一份 Common Pool，但每个外接 segment 的 Local 素材仍来自自己的 Group 节点。
+
+Common Prompt 与 Common 素材选择互相独立：关闭 `使用 Common Prompt` 只是不拼接公共文字，不会取消已勾选素材。每个素材都有稳定 asset ID；工作流保存的是这个身份，不是当时的数字标签。因此取消 B 后，C 的可视标签可以从 `<Picture 3>` 变成 `<Picture 2>`，但 Prompt chip 仍然指向同一个 C。若提示词引用了已取消、已删除或不属于该段的素材，执行前会明确报错，不会静默指向另一张图。
+
+参考视频自带的 soundtrack 会按官方 Ref2VA 顺序进入 Audio 槽位，再接独立参考音频。Picture、Video、Audio 的数量上限会在编译有效集合时检查，超过上限会在加载模型前报出具体分段与类型。
+
+## Prompt chip 与素材引用
+
+在 R2V 提示词输入框键入 `@` 会打开当前分段的有效素材列表，只显示该段已选择的 Common 和 Local。选中后插入一个不可拆开的 Prompt chip；chip 显示当前官方标签，但内部保存稳定 asset ID，所以 Common 勾选改变后会自动重新编号。
+
+- 方向键可移动候选项目，菜单会自动滚动到当前项。
+- Backspace/Delete 会一次删除整个 chip，不会把内部 token 切成残片，也不会触发节点删除快捷键。
+- 在候选菜单内滚动不会关闭菜单。
+- 工作流序列化保存语义 token，Queue 前才编译成 MiniMax H3 官方 `<Picture N>` / `<Video N>` / `<Audio N>` 文本。
 
 ## Director 时间轴与导出
 
@@ -147,6 +177,18 @@ python\python.exe -m pip install -r ComfyUI\custom_nodes\ComfyUI-MiniMax-H3-Moti
 - `分段导出` 会把每个分段作为独立输出。
 - `选择运行` 只采样勾选分段。未勾选部分在全部导出时优先读取有效缓存；V2V/RV2V 可在适用时使用源视频 passthrough。
 - 可见分段长度、最终 `frame_count`、fps 与总时长以用户时间轴为准。内部 H3 对齐产生的额外帧不会直接暴露到导出结果。
+
+### External Groups 与 Reroute
+
+`i2v_groups` / `r2v_groups` 可以直接连接 Group 或 Groups Combine，也可以经过一层或多层标准 Reroute、名称包含 Reroute 的第三方节点（包括 rgthree Reroute），以及明确标记为 virtual 且只有一个已连接输入的前端直通节点。解析器最多追踪 16 层并检测循环；断链、循环或缺少上游节点会安全停止。
+
+普通语义处理节点即使只有一个输入也不会被当作 Reroute 穿透。未知上游 packer 仍按原规则保留空 segment 槽位，让运行选择和时间轴位置不会错位。External R2V 的 Local 素材来自 Group 节点，Common 选择与 Common Prompt 仍由 Director 时间轴统一管理。
+
+### FL2V 仅尾帧
+
+每个 FL2V 镜头可上传：仅首帧、首帧+尾帧，或仅尾帧。仅尾帧时，尾图只会送入官方 `last_frame` / image1；系统不会把它复制成 image0，也不会把 generation timeline 为 schema 保留的 `16×16` 灰色 placeholder 当作首帧。卡片和时间轴只显示橙色尾帧角标，尾图缩图占满该镜头，不显示绿色假首帧。
+
+旧工作流 mirror 会用 `endOnly=true` 保存这项语义。若 FL2V 同时启用 Motion Context，传入的 visual context 会替代旧的起点 keyframe，但用户明确提供的尾端 keyframe 会重新映射到当前可见输出的最后一帧，不会被 Motion Context 合并覆盖。
 
 ## 内部与外接采样
 
@@ -163,14 +205,15 @@ python\python.exe -m pip install -r ComfyUI\custom_nodes\ComfyUI-MiniMax-H3-Moti
 Motion Context 的真实数据流是：
 
 ```text
-上一段最终导出帧
-→ 选择尾部 H3 合法帧数
-→ 调整到当前 authoritative canvas
-→ 可选 Color Re-anchor
-→ 32 像素 preflight
-→ video VAE encode
+上一段采样产生的 AV latent
+→ 只选择不超过可见导出终点的 H3 latent block
+→ 直接写入下一段 visual / audio Motion Context
 → 写入下一段 MiniMax H3 conditioning
 ```
+
+这是 latent-first handoff：正常连续运行不需要先把上一段解码成 RGB，再重新 VAE encode。每段仍会保存最终导出 RGB/音频的像素缓存，供旧缓存、缺少 latent companion 或兼容路径使用。选择运行后续段时，优先读取版本化的 AV latent companion；若 companion 不存在但有效像素 cache 存在，会明确报告 `pixels (fallback)` 并走旧的 VAE encode 路径；两者都没有则直接报错。
+
+Color Re-anchor 是刻意的例外。它必须在 RGB 画面上计算颜色统计，所以开启后 visual 路径会使用像素缓存并报告 `pixels (Color Re-anchor)`；Audio Context 仍可独立使用 latent-first，不会因为视觉调色一起退回 waveform encode。H3 为采样网格补出的尾部帧不会被当成已导出的上下文，handoff endpoint 永远不超过用户实际可见的上一段终点。
 
 多段 T2V/I2V/R2V/FL2V 会显示 Motion Context、上下文帧数和延续生成音频。V2V/RV2V 使用互斥的“视觉续接方式”：`Source Bridge`、`Motion Context`、`关闭`。单段任务只显示“仅多段生成可用”的提示，隐藏的控件不占节点高度。
 
@@ -183,13 +226,6 @@ Motion Context 只在 24 fps 下运行。请求的 `context_length` 会向下选
 - 后续某段显式上传新图片时，该段是新的 I2V anchor：跳过传入该段的 visual MC，并按现有规则重置音频上下文。
 - 新图片之后的空分段继续继承这个新的 anchor。
 - Motion Context 关闭时，每个 I2V 分段仍必须有自己的图片，不会静默变成 continuation。
-
-### R2V 参考集合继承
-
-- Segment 1 必须有完整参考集合。
-- 后续空组继承最近一个完整的显式参考集合，包括 Picture、参考视频与参考音频。
-- 继承的是整组 effective references，不会把不同分段的槽位拼接成一套新集合。
-- 外接 R2V Group 使用同一套继承规则。
 
 ### 延续生成音频
 
@@ -255,7 +291,7 @@ Director 对 reference video 执行向上对齐：
 
 因此 121/122 帧的 source 不会再被向下截到 107；例如 127 帧 reference base 会向上准备到 141 帧。
 
-## 动态 32 像素空间对齐
+## 全局 32 像素空间对齐
 
 MiniMax H3 的 visual video conditioning 在 video VAE latent 后还要进入 spatial patchify，因此相关画布必须满足：
 
@@ -264,27 +300,25 @@ width % 32 == 0
 height % 32 == 0
 ```
 
-Director 使用统一的 task/path-aware helper 自动决定 authoritative spatial stride：
+所有 MiniMax H3 任务统一使用 32 像素空间网格，包括 T2V、I2V、FL2V、R2V、V2V、RV2V，无论单段/多段、Motion Context 开/关、是否有参考视频。UI resolution、target、reference video、Motion Context、Source Bridge source 与 Color Re-anchor anchor 都使用同一个 authoritative canvas。
 
-- 32 像素：Motion Context visual frames、V2V/RV2V `<Video 1>`、实际带参考视频的 R2V、Source Bridge `<Video 1>`，以及任何进入 `MiniMaxH3ReferenceToVideo` video patchify 的 tensor。
-- 16 像素仍可用：普通 T2V、单段 I2V/MC 关闭、只有静态 Picture 的 R2V/MC 关闭，以及其他不经过 visual video conditioning 的基础路径。
-
-这不是用户选项。UI resolution 与后端会使用相同的动态 stride。例如基础 16 路径可保留 `656×864`；一旦该段需要 visual video conditioning，同样的尺寸会按现有 long-edge/nearest-multiple 策略确定为 `640×864`。target、reference video、Motion Context、Source Bridge source 与用于 Color Re-anchor 统计的 anchor 会使用同一个 authoritative canvas。
+这不是用户选项，也不再存在运行时 16/32 分支。例如输入 `656×864` 会按现有 nearest-multiple 策略统一成为 `640×864`。这样同一工作流后来开启 Motion Context、加入参考视频或切换任务时，不会突然改变 canvas 规则，也不会重用旧的 16-grid cache。
 
 在进入 conditioning/VAE patchify 前还有明确 preflight。非法尺寸会报告 task、path、实际宽高与 `required_stride=32`，不会等到底层才出现难以理解的 shape 错误。
 
 ## 缓存与选择运行
 
-Director 使用两类版本化磁盘缓存：
+Director 使用版本化磁盘缓存：
 
 - segment cache：保存 nominal 分段解码结果，供部分重跑、全部导出和 Source Bridge 相邻 anchors 使用；
-- Motion Context cache：保存上一段最终导出帧与生成音频，供单独运行后续分段时恢复 continuity。
+- Motion Context 像素 cache：保存上一段最终导出帧与生成音频，作为兼容 fallback；
+- Motion Context AV latent companion：独立保存 CPU latent、可见 context endpoint、trim/export/sample 帧数，供 latent-first selection-run 恢复 continuity。
 
-Motion Context cache fingerprint 包含时间轴、提示词、seed、采样设置、模型选项、参考素材、Color Re-anchor 开关/算法版本，以及 authoritative spatial stride/管线版本。segment cache identity 记录分段范围、提示词、参考槽位、I2V/R2V anchor tensor 内容、Source Bridge 版本、Color Re-anchor 状态与空间管线版本。对应 identity 发生变化时，旧缓存会失效。
+Motion Context cache fingerprint 包含时间轴、提示词、seed、采样设置、模型选项、有效参考素材、Color Re-anchor 开关/算法版本、latent handoff pipeline，以及全局 32 spatial pipeline 版本。segment cache identity 记录分段范围、提示词、Common/Local asset ID 与内容、I2V/R2V anchor tensor、Source Bridge 版本和空间管线版本。对应 identity 发生变化时，旧缓存会失效；只有旧像素 cache 时会走明确的 fallback，不会伪装成 latent-first。
 
 单独运行后续分段时：
 
-- Motion Context 需要前一段有效的 exported-context cache；
+- Motion Context 优先需要前一段有效 AV latent companion；缺少时可使用有效 exported pixel cache；
 - Source Bridge 需要边界两侧的 nominal generated-segment cache；
 - 缺少或过期时会明确报错，先完整运行一次或补跑所需相邻段。
 
@@ -305,6 +339,7 @@ Motion Context cache fingerprint 包含时间轴、提示词、seed、采样设�
 - 多段续接会增加 VAE encode、缓存和显存开销。
 - 不同模型、LoRA、sampler、素材运动与提示词可能显著改变续接效果；现有真实 GPU 观察不能当作普遍质量保证。
 - 当前测试环境的部分 Turbo/pruned 模型组合可能与附加 Motion/Audio conditioning 不兼容。
+- FL2V 仅尾帧、Common/Local 多素材重编号和 latent-first handoff 已有自动测试，但仍需用户使用自己的模型与素材做真实 GPU 质量验收。
 
 ## 开发与验证
 
@@ -316,7 +351,7 @@ python -m pytest -q
 node --test tests_js/*.test.mjs
 ```
 
-真实 GPU 验收至少应分别检查：I2V 三段 MC 开/关 Color Re-anchor、R2V 三段 MC + Color Re-anchor、V2V/RV2V 的 Motion Context + Color Re-anchor，以及 V2V/RV2V Source Bridge。重点确认所有 visual conditioning 为 32-safe、Source Bridge UI 不显示 Color Re-anchor，并且导出帧数与音频时长不变。
+真实 GPU 验收至少应分别检查：R2V Common A、B、C + Local D/E 的分段组合、纯场景空素材段、Prompt chip 重编号、I2V/R2V latent-first MC、Color Re-anchor 像素 fallback、FL2V 仅尾帧、V2V/RV2V Source Bridge，以及 External Groups 经一层/多层 Reroute。重点确认所有 H3 画布为 32-safe、有效素材顺序与报告一致，并且导出帧数与音频时长不变。
 
 ## 许可证与上游来源
 
