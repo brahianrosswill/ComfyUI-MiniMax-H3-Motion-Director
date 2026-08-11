@@ -101,6 +101,10 @@ import {
     stashBatchTaskWorkspace,
 } from "./minimax_batch_workspaces.mjs";
 import {
+    mountR2vCommonToggle,
+    syncR2vCommonToggleForTask,
+} from "./minimax_r2v_common_ui.mjs";
+import {
     VIDEO_CONTINUITY_STRATEGIES,
     applyVideoStrategyToWidgets,
     migrateColorReanchorWidgetValues,
@@ -988,9 +992,10 @@ const STYLES = `
 .bd-btn-del-split:hover{background:#4a1515;border-color:#f88;color:#fcc}
 .bd-btn-sm{padding:3px 8px;font-size:10px}
 .bd-btn-run-select.active{background:#1a3a2a;color:#4fff8f;border-color:#4fff8f}
-.bd-output .bd-btn-live-preview{margin-left:auto;background:#222;border-color:#333;color:#aaa;white-space:nowrap;height:29px;min-height:29px;padding:4px 12px}
-.bd-output .bd-btn-live-preview:hover{background:#2a2a2a;border-color:#555;color:#ddd}
-.bd-output .bd-btn-live-preview.active{background:#1a3a2a;color:#4fff8f;border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.35)}
+.bd-output .bd-output-button-group{margin-left:auto;display:inline-flex;align-items:center;gap:6px;flex-wrap:nowrap;flex-shrink:0}
+.bd-output .bd-btn-live-preview,.bd-output .bd-r2v-common-toggle{background:#222;border-color:#333;color:#aaa;white-space:nowrap;height:29px;min-height:29px;padding:4px 12px}
+.bd-output .bd-btn-live-preview:hover,.bd-output .bd-r2v-common-toggle:hover{background:#2a2a2a;border-color:#555;color:#ddd}
+.bd-output .bd-btn-live-preview.active,.bd-output .bd-r2v-common-toggle.active{background:#1a3a2a;color:#4fff8f;border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.35)}
 .bd-live-sample{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:8px;padding:10px 12px;background:linear-gradient(165deg,#1a1a1a 0%,#121212 100%);border:1px solid #333;border-radius:10px;flex-shrink:0}
 .bd-live-sample.hidden{display:none!important}
 .bd-live-sample.receiving{border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.35)}
@@ -2483,6 +2488,7 @@ class MiniMaxH3MotionDirectorEditor {
                 <input type="number" class="bd-num" data-r="segment-continuity-overlap" min="1" max="81" step="4" value="9" style="width:48px">
             </span>
             <button type="button" class="bd-btn bd-btn-live-preview active" data-a="live-tae-preview" data-i18n="toolbar.liveTaePreview" data-i18n-title="tooltip.liveTaePreview">实时预览</button>`;
+        this.r2vCommonToggle = mountR2vCommonToggle(outputBar);
         this.mainBody.appendChild(outputBar);
         this.outputBarEl = outputBar;
 
@@ -3828,6 +3834,13 @@ class MiniMaxH3MotionDirectorEditor {
 
         const taskKey = this.getTaskKey();
         const isR2v = isBatch && taskKey === "r2v";
+        syncR2vCommonToggleForTask(this.r2vCommonToggle, {
+            taskKey,
+            expanded: !!this._r2vCommonExpanded,
+            label: t("batch.r2v.commonReferences"),
+            expandTitle: t("tooltip.r2vCommonExpand"),
+            collapseTitle: t("tooltip.r2vCommonCollapse"),
+        });
         // fl2v / r2v use the main timeline track; other batch + gen hide it.
         const hideTimeline = (isBatch && !isR2v) || isGen;
         const hideVideoUpload = hideTimeline || NO_VIDEO_UPLOAD_TASKS.has(taskKey) || isR2v;

@@ -46,6 +46,7 @@ import {
     replaceReferenceAssetAtSlot,
     setCommonAssetEnabled,
 } from "./minimax_reference_assets.mjs";
+import { syncR2vCommonToggleForTask } from "./minimax_r2v_common_ui.mjs";
 import { t } from "./minimax_i18n.js";
 
 const _players = new WeakMap();
@@ -464,7 +465,6 @@ export function mountImageBatchPanel(root) {
         <div class="bd-batch-toolbar">
             <button type="button" class="bd-btn bd-btn-primary" data-a="batch-add" data-i18n="batch.addPromptGroup">+ 添加提示词组</button>
             <button type="button" class="bd-btn bd-batch-run-select hidden" data-a="batch-run-select" data-i18n="toolbar.runSelect" data-i18n-title="tooltip.batchRunSelect">选择运行</button>
-            <button type="button" class="bd-btn bd-r2v-common-toggle hidden" data-a="r2v-common-toggle" data-i18n="batch.r2v.commonReferences" data-i18n-title="tooltip.r2vCommonReferences">公共参考素材</button>
             <label class="bd-batch-run-all hidden" data-r="batch-run-all-wrap" data-i18n-title="tooltip.runSelectAll">
                 <input type="checkbox" data-r="batch-run-all-cb">
                 <span data-i18n="toolbar.selectAll">全选</span>
@@ -484,7 +484,6 @@ export function mountImageBatchPanel(root) {
         runSelectBtn: panel.querySelector('[data-a="batch-run-select"]'),
         runSelectAllWrap: panel.querySelector('[data-r="batch-run-all-wrap"]'),
         runSelectAllCb: panel.querySelector('[data-r="batch-run-all-cb"]'),
-        commonToggle: panel.querySelector('[data-a="r2v-common-toggle"]'),
         commonPanel: panel.querySelector('[data-r="r2v-common-panel"]'),
     };
 }
@@ -493,7 +492,6 @@ export function wireBatchRunSelectControls(editor, batchUi) {
     editor.batchRunSelectBtn = batchUi.runSelectBtn;
     editor.batchRunSelectAllWrap = batchUi.runSelectAllWrap;
     editor.batchRunSelectAllCb = batchUi.runSelectAllCb;
-    editor.r2vCommonToggle = batchUi.commonToggle;
     editor.r2vCommonPanel = batchUi.commonPanel;
     batchUi.runSelectBtn?.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -504,7 +502,7 @@ export function wireBatchRunSelectControls(editor, batchUi) {
         if (!editor.isRunSelectEnabled?.()) return;
         editor.setRunSelectionAll?.(batchUi.runSelectAllCb.checked);
     });
-    batchUi.commonToggle?.addEventListener("click", (e) => {
+    editor.r2vCommonToggle?.addEventListener("click", (e) => {
         e.stopPropagation();
         editor._r2vCommonExpanded = !editor._r2vCommonExpanded;
         editor.renderImageBatchGroups?.();
@@ -1672,11 +1670,13 @@ export function renderImageBatchGroups(editor) {
     }
 
     list.innerHTML = "";
-    if (editor.r2vCommonToggle) {
-        editor.r2vCommonToggle.classList.toggle("hidden", key !== "r2v");
-        editor.r2vCommonToggle.textContent = t("batch.r2v.commonReferences");
-        editor.r2vCommonToggle.title = t("tooltip.r2vCommonReferences");
-    }
+    syncR2vCommonToggleForTask(editor.r2vCommonToggle, {
+        taskKey: key,
+        expanded: !!editor._r2vCommonExpanded,
+        label: t("batch.r2v.commonReferences"),
+        expandTitle: t("tooltip.r2vCommonExpand"),
+        collapseTitle: t("tooltip.r2vCommonCollapse"),
+    });
     if (editor.r2vCommonPanel) {
         editor.r2vCommonPanel.replaceChildren();
         editor.r2vCommonPanel.classList.toggle("hidden", key !== "r2v" || !editor._r2vCommonExpanded);
