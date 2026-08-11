@@ -357,7 +357,7 @@ def execute_director_plan_core(
             )
 
     cache_settings: dict[str, Any] = {
-        "pipeline": "exported_motion_context_tail_v2",
+        "pipeline": "exported_motion_context_tail_v3",
         "seed": int(seed),
         "cfg": float(cfg),
         "sampling_mode": sampling_mode,

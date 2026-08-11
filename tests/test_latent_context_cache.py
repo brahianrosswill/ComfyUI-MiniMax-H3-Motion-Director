@@ -90,14 +90,23 @@ def test_persisted_latent_tail_can_serve_every_supported_context_length(
     assert audio_ref["audio_latent"].shape[-1] == audio_steps
 
 
-def test_old_or_stale_latent_cache_is_not_mistaken_for_current_handoff(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("version", "format_name"),
+    [
+        (1, "minimax_h3_motion_director_av_latent_handoff_v1"),
+        (2, "minimax_h3_motion_director_av_latent_tail_v2"),
+    ],
+)
+def test_old_or_stale_latent_cache_is_not_mistaken_for_current_handoff(
+    monkeypatch, tmp_path, version, format_name
+):
     seg, plan, _latent, _handoff = _objects()
     monkeypatch.setattr(latent_context_cache, "_cache_root", lambda _node: tmp_path)
     monkeypatch.setattr(latent_context_cache, "context_fingerprint", lambda *_a, **_k: {"fp": 2})
     torch.save(
         {
-            "format": "minimax_h3_motion_director_av_latent_handoff_v1",
-            "version": 1,
+            "format": format_name,
+            "version": version,
             "latent": {"samples": (torch.zeros(1),)},
         },
         tmp_path / "seg_0000.av.pt",

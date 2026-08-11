@@ -314,7 +314,7 @@ Director 使用版本化磁盘缓存：
 - Motion Context 像素 cache：只保存可见导出终点的最后最多 39 帧 RGB，以及按真实 fps/sample rate 精确对应的末尾 waveform，作为兼容 fallback；
 - Motion Context AV latent companion：只保存最后最多 39 个可见帧对应的完整 H3 video latent blocks 与同时间窗 audio latent。H3 对齐产生、但超过可见 endpoint 的 overshoot 不会写入。
 
-Motion Context cache fingerprint 包含时间轴、提示词、seed、采样设置、模型选项、有效参考素材、Color Re-anchor 开关/算法版本、latent handoff pipeline，以及全局 32 spatial pipeline 版本。`context_length` 只是下一段消费 tail 时选择 1/5/22/39 帧的设置，不属于上一段生成结果身份；从 22 改成 39 不会仅因此让上一段 cache 失效。segment cache identity 记录分段范围、提示词、Common/Local asset ID 与内容、I2V/R2V anchor tensor、Source Bridge 版本和空间管线版本。对应生产 identity 发生变化时，旧缓存会失效；V1 的整段 Motion Context cache 也会直接视为 miss，不会和 V2 tail 格式混用。
+Motion Context cache fingerprint 只包含当前分段的提示词、范围、有效素材/source、生成设置，以及该分段实际使用的上游 Motion Context producer digest，不再哈希未来分段。向时间线末尾新增或修改后续分段，不会使此前未修改分段的 Motion Context 缓存失效；只有影响该分段实际生成结果或其有效上游 Motion Context 的修改才会使缓存失效。I2V 明确上传新图的 reset 会截断上游依赖。`context_length` 仍只是下一段消费 tail 时选择 1/5/22/39 帧的设置，不属于上一段生成结果身份；从 22 改成 39 不会仅因此让上一段 cache 失效。旧 V1/V2 Motion Context cache 会直接视为 miss，不会和 V3 segment-dependency 格式混用。
 
 Source Bridge 在同一次 Queue 内会优先使用刚生成、仍在内存中的 nominal Segment，不会为了马上读取而先写入数 GB 文件；只有跨 Queue 缺少内存结果时才读取磁盘 Segment cache。所有 cache 写入仍是 best-effort：磁盘满、只读目录或发布失败不会中断当前主生成，但以后真正依赖缺失 cache 的选择运行或 Bridge 会清楚报错，不会偷偷补采样未选 Segment。
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from _minimax_h3_motion_director_testpkg.director import context_cache
@@ -48,11 +49,26 @@ def test_exported_context_cache_persists_only_maximum_39_frame_tail(monkeypatch,
     assert loaded.metadata["stored_audio_samples"] == expected_audio_samples
 
 
-def test_context_fingerprint_ignores_consumer_context_length(monkeypatch):
-    seg = SimpleNamespace(index=0, timeline_index=0)
-    plan = SimpleNamespace()
-    timeline = {"segments": [{"index": 0, "prompt": "same result"}]}
-    monkeypatch.setattr(context_cache, "_timeline_identity", lambda _plan: timeline)
+def test_context_fingerprint_ignores_consumer_context_length():
+    seg = SimpleNamespace(
+        index=0,
+        timeline_index=0,
+        start_frame=0,
+        end_frame=10,
+        prompt="same result",
+        negative_prompt="",
+        task_key="t2v",
+        task_type="t2v",
+        source_clip=None,
+        refs=[],
+        ref_audios=[],
+        ref_videos=[],
+        ref_video_audios=[],
+        reference_video_meta={},
+        reference_video_start_frame=0,
+        reference_tags={},
+    )
+    plan = SimpleNamespace(segments=[seg], raw={})
 
     short = context_cache.context_fingerprint(
         seg, plan, {"seed": 1, "context_length": 22, "steps": 8}
@@ -62,16 +78,23 @@ def test_context_fingerprint_ignores_consumer_context_length(monkeypatch):
     )
 
     assert short == long
-    assert "context_length" not in short["settings"]
+    assert short["producer_digest"] == long["producer_digest"]
 
 
-def test_v1_exported_context_cache_is_invalid(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("version", "format_name"),
+    [
+        (1, "minimax_h3_motion_director_exported_context_v1"),
+        (2, "minimax_h3_motion_director_exported_context_tail_v2"),
+    ],
+)
+def test_old_exported_context_cache_is_invalid(monkeypatch, tmp_path, version, format_name):
     seg, plan, _frames, _audio = _objects(39)
     monkeypatch.setattr(context_cache, "_cache_root", lambda _node: tmp_path)
     torch.save(
         {
-            "format": "minimax_h3_motion_director_exported_context_v1",
-            "version": 1,
+            "format": format_name,
+            "version": version,
             "frames": torch.zeros((39, 1, 1, 3)),
         },
         tmp_path / "seg_0000.pt",

@@ -16,9 +16,9 @@ from .segment_cache import _write_via_temp
 
 log = logging.getLogger("ComfyUI-MiniMax-H3-Motion-Director.latent_context_cache")
 
-LATENT_CACHE_VERSION = 2
-LATENT_CACHE_FORMAT = "minimax_h3_motion_director_av_latent_tail_v2"
-LATENT_HANDOFF_PIPELINE = "motion_context_latent_tail_v2"
+LATENT_CACHE_VERSION = 3
+LATENT_CACHE_FORMAT = "minimax_h3_motion_director_av_latent_tail_v3"
+LATENT_HANDOFF_PIPELINE = "motion_context_latent_tail_v3"
 MAX_PERSISTED_CONTEXT_FRAMES = 39
 
 
