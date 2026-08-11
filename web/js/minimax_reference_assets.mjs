@@ -175,4 +175,3 @@ export function compileSemanticPrompt(prompt, effectiveAssets, options = {}) {
         throw new Error(`${segmentLabel} prompt references unknown ${pretty} asset "${assetId}".`);
     });
 }
-
