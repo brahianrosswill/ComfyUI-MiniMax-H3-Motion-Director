@@ -7,6 +7,7 @@
 
 import { app } from "../../scripts/app.js";
 import { api } from "../../scripts/api.js";
+import { resolveExternalGroupTerminal } from "./minimax_external_groups.mjs";
 import {
     CUSTOM_ASPECT_RATIO,
     DEFAULT_ASPECT_RATIO,
@@ -9416,11 +9417,10 @@ function isCombineGroupSlot(input) {
 }
 
 function expandExternalGroupLink(graph, linkId, depth = 0) {
-    if (linkId == null || depth > 10) return [];
-    const rec = graphLinkRecord(graph, linkId);
-    if (!rec) return [];
-    const node = graph.getNodeById?.(rec.originId);
-    if (!node) return [];
+    if (linkId == null || depth > 16) return [];
+    const terminal = resolveExternalGroupTerminal(graph, linkId, 16 - depth);
+    if (!terminal) return [];
+    const node = terminal.node;
     const cls = node.comfyClass || node.type || "";
     if (cls === EXTERNAL_COMBINE_NODE_TYPE) {
         const out = [];
