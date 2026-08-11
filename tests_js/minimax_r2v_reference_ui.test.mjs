@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 import { setLocale, t } from "../web/js/minimax_i18n.js";
 
 import {
-    configureR2vCommonPanel,
     formatR2vAssetStatusLabel,
     mountR2vCommonSelection,
     mountR2vMediaLayout,
@@ -85,26 +84,17 @@ function descendants(root) {
     return result;
 }
 
-test("Common media layout contains assets only and is width-capped", () => {
+test("Segment media layout keeps its Local assets and prompt/preview columns", () => {
     const documentRef = new TestDocument();
-    const panel = documentRef.createElement("div");
-    configureR2vCommonPanel(panel);
     const card = documentRef.createElement("div");
-    const layout = mountR2vMediaLayout(card, { documentRef, commonOnly: true });
+    const layout = mountR2vMediaLayout(card, { documentRef });
 
-    assert.equal(layout.main, null);
+    assert.equal(layout.main.classList.contains("bd-batch-r2v-main"), true);
     assert.equal(layout.assets.classList.contains("bd-batch-r2v-assets"), true);
-    assert.equal(layout.body.classList.contains("bd-batch-r2v-body-assets-only"), true);
     assert.equal(
         descendants(card).some((element) => element.classList.contains("bd-batch-r2v-main")),
-        false,
+        true,
     );
-    assert.equal(card.style.width, "min(100%, 680px)");
-    assert.equal(card.style.maxWidth, "680px");
-    assert.equal(card.style.alignSelf, "flex-start");
-    assert.equal(panel.style.width, "min(100%, 680px)");
-    assert.equal(panel.style.maxWidth, "680px");
-    assert.equal(panel.style.alignSelf, "flex-start");
 });
 
 test("Segment Common selection has select actions and item checkboxes without a master checkbox", () => {

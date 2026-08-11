@@ -47,11 +47,15 @@ import {
 } from "./minimax_reference_assets.mjs";
 import { syncR2vCommonToggleForTask } from "./minimax_r2v_common_ui.mjs";
 import {
-    configureR2vCommonPanel,
     formatR2vAssetStatusLabel,
     mountR2vCommonSelection,
     mountR2vMediaLayout,
 } from "./minimax_r2v_reference_ui.mjs";
+import {
+    buildR2vCommonSections,
+    createR2vCommonPopover,
+    renderR2vCommonSections,
+} from "./minimax_r2v_common_popover.mjs";
 import { t } from "./minimax_i18n.js";
 
 const _players = new WeakMap();
@@ -252,8 +256,17 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-run-all input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
 /* max-height must stay in sync with BATCH_LIST_MAX_H in getImageBatchUiHeight(). */
 .bd-batch-list{display:flex;flex-direction:column;gap:8px;width:100%;max-height:640px;overflow-y:auto;padding-right:2px}
-.bd-r2v-common-toggle.hidden,.bd-r2v-common-panel.hidden{display:none!important}
-.bd-r2v-common-panel{margin:0 0 8px;padding:12px 14px;border:1px solid #46644f;border-radius:10px;background:linear-gradient(165deg,#172019 0%,#131713 58%,#101210 100%);display:flex;align-items:flex-start}
+.bd-r2v-common-toggle.hidden,.bd-r2v-common-popover[hidden]{display:none!important}
+.bd-r2v-common-popover{position:fixed;z-index:150;box-sizing:border-box;max-width:calc(100vw - 32px);overflow-y:auto;padding:14px;border:1px solid #46644f;border-radius:12px;background:linear-gradient(165deg,#172019 0%,#131713 58%,#101210 100%);box-shadow:0 18px 54px rgba(0,0,0,.65)}
+.bd-r2v-common-popover-title{margin:0 0 12px;color:#f0f5f1;font-size:14px;font-weight:700}
+.bd-r2v-common-popover-body{display:flex;flex-direction:column;gap:12px}
+.bd-r2v-common-popover-section{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px solid #2d3b31;border-radius:10px;background:#0c100d}
+.bd-r2v-common-popover-section-head{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#eaeaea;font-size:11px}
+.bd-r2v-common-popover-section-head span{color:#7f9485;font-variant-numeric:tabular-nums}
+.bd-r2v-common-popover-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(132px,1fr));gap:8px}
+.bd-r2v-common-popover-asset{min-width:0}
+.bd-r2v-common-popover-add{min-height:86px;border:1px dashed #46644f;border-radius:8px;background:#101711;color:#9dc9aa;cursor:pointer;font-size:11px}
+.bd-r2v-common-popover-add:hover{border-color:#65a879;background:#152019;color:#d7f3df}
 .bd-batch-card{background:linear-gradient(165deg,#1a1a1a 0%,#141414 55%,#111 100%);border:1px solid #2c2c2c;border-radius:10px;padding:12px 14px;display:grid;gap:10px;align-items:stretch;box-shadow:inset 0 1px 0 rgba(255,255,255,.03)}
 /* t2v: 提示词为主，预览收成右侧窄栏 */
 .bd-batch-card.bd-batch-plain{grid-template-columns:minmax(0,1fr) minmax(132px,168px)}
@@ -267,7 +280,6 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-plain .bd-batch-preview,.bd-batch-source .bd-batch-preview,.bd-batch-refs:not(.bd-batch-r2v) .bd-batch-preview{border-radius:10px;border-color:#262626;background:#0c0c0c}
 /* ——— r2v asset stage (polished) ——— */
 .bd-batch-card.bd-batch-r2v{display:flex;flex-direction:column;gap:12px;padding:14px 16px;background:linear-gradient(165deg,#1c1c1c 0%,#141414 52%,#111 100%);border:1px solid #2c2c2c;border-radius:12px;box-shadow:inset 0 1px 0 rgba(255,255,255,.035);align-items:stretch}
-.bd-r2v-common-card{border-color:#46644f;background:linear-gradient(165deg,#172019 0%,#131713 58%,#101210 100%)}
 .bd-r2v-common-select{display:flex;flex-direction:column;gap:7px;padding:9px 10px;border:1px solid #333;border-radius:8px;background:#121512}
 .bd-r2v-common-select-head{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#aaa;font-size:11px;font-weight:650}
 .bd-r2v-common-actions{display:flex;gap:6px}.bd-r2v-common-actions button{font-size:10px;padding:2px 7px}
@@ -299,8 +311,6 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-media{display:flex;flex-direction:column;gap:4px;min-width:88px;max-width:120px}
 /* Left = assets (narrower) · Right = prompt + preview (wider) */
 .bd-batch-r2v-body{display:grid;grid-template-columns:minmax(260px,.85fr) minmax(0,1.4fr);gap:12px;width:100%;align-items:stretch}
-.bd-batch-r2v-body.bd-batch-r2v-body-assets-only{display:block;width:100%}
-.bd-r2v-common-card .bd-batch-r2v-assets{width:100%}
 .bd-batch-r2v-assets{display:flex;flex-direction:column;gap:10px;min-width:0}
 .bd-batch-r2v-main{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0}
 .bd-r2v-section{background:#0c0c0c;border:1px solid #262626;border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-width:0;box-sizing:border-box}
@@ -478,7 +488,6 @@ export function mountImageBatchPanel(root) {
             <span class="bd-meta" data-r="batch-hint" data-i18n="batch.hint.defaultImage">每组生成 1 张图片</span>
         </div>
         <div class="bd-batch-i2v-notice" data-r="batch-i2v-notice"></div>
-        <div class="bd-r2v-common-panel hidden" data-r="r2v-common-panel"></div>
         <div class="bd-batch-list" data-r="batch-list"></div>`;
     root.appendChild(panel);
     return {
@@ -490,7 +499,6 @@ export function mountImageBatchPanel(root) {
         runSelectBtn: panel.querySelector('[data-a="batch-run-select"]'),
         runSelectAllWrap: panel.querySelector('[data-r="batch-run-all-wrap"]'),
         runSelectAllCb: panel.querySelector('[data-r="batch-run-all-cb"]'),
-        commonPanel: panel.querySelector('[data-r="r2v-common-panel"]'),
     };
 }
 
@@ -498,7 +506,6 @@ export function wireBatchRunSelectControls(editor, batchUi) {
     editor.batchRunSelectBtn = batchUi.runSelectBtn;
     editor.batchRunSelectAllWrap = batchUi.runSelectAllWrap;
     editor.batchRunSelectAllCb = batchUi.runSelectAllCb;
-    editor.r2vCommonPanel = batchUi.commonPanel;
     batchUi.runSelectBtn?.addEventListener("click", (e) => {
         e.stopPropagation();
         editor.toggleRunSelectMode?.();
@@ -508,11 +515,28 @@ export function wireBatchRunSelectControls(editor, batchUi) {
         if (!editor.isRunSelectEnabled?.()) return;
         editor.setRunSelectionAll?.(batchUi.runSelectAllCb.checked);
     });
-    editor.r2vCommonToggle?.addEventListener("click", (e) => {
-        e.stopPropagation();
-        editor._r2vCommonExpanded = !editor._r2vCommonExpanded;
-        editor.renderImageBatchGroups?.();
-    });
+    if (editor.r2vCommonToggle && editor._directorOverlayLayer) {
+        editor._r2vCommonPopover?.destroy?.();
+        editor._r2vCommonPopover = createR2vCommonPopover({
+            anchor: editor.r2vCommonToggle,
+            overlayLayer: editor._directorOverlayLayer,
+            onRender: (body) => renderR2vCommonPopoverContent(body, editor),
+            onOpenChange: (expanded) => {
+                syncR2vCommonToggleForTask(editor.r2vCommonToggle, {
+                    taskKey: editor.getTaskKey?.(),
+                    expanded,
+                    label: t("batch.r2v.commonReferences"),
+                    expandTitle: t("tooltip.r2vCommonExpand"),
+                    collapseTitle: t("tooltip.r2vCommonCollapse"),
+                });
+            },
+        });
+        editor.r2vCommonToggle.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            editor._r2vCommonPopover?.toggle();
+        });
+    }
 }
 
 function cloneRefs(refs) {
@@ -1309,11 +1333,6 @@ function appendR2vMediaSections(card, seg, index, editor) {
     return main;
 }
 
-function appendR2vCommonMediaSections(card, common, editor) {
-    const { assets } = mountR2vMediaLayout(card, { commonOnly: true });
-    appendR2vAssetSections(assets, common, -1, editor);
-}
-
 function appendCommonSelection(card, editor, seg) {
     const commonAssets = allKnownReferenceAssets(editor.timeline.r2vCommon || {});
     const states = new Map(
@@ -1355,22 +1374,54 @@ function appendCommonSelection(card, editor, seg) {
     });
 }
 
-function appendCommonPoolCard(panel, editor) {
-    configureR2vCommonPanel(panel);
+function renderR2vCommonPopoverContent(body, editor) {
     const common = editor.timeline.r2vCommon || (editor.timeline.r2vCommon = { refs: [], refVideos: [], refAudios: [] });
-    const card = document.createElement("div");
-    card.className = "bd-batch-r2v bd-r2v-common-card";
-    const head = document.createElement("div");
-    head.className = "bd-batch-head";
-    const title = document.createElement("b");
-    title.textContent = t("batch.r2v.commonPool");
-    const hint = document.createElement("span");
-    hint.className = "bd-batch-head-meta";
-    hint.textContent = t("batch.r2v.commonPoolHint");
-    head.append(title, hint);
-    card.appendChild(head);
-    appendR2vCommonMediaSections(card, common, editor);
-    panel.appendChild(card);
+    editor._r2vCommonPopover?.setTitle(t("batch.r2v.commonReferences"));
+    renderR2vCommonSections(body, buildR2vCommonSections(common), {
+        labels: {
+            section: (kind) => t("batch.r2v.section" + ({
+                picture: "Pictures",
+                video: "Videos",
+                audio: "Audios",
+            })[kind]),
+            add: (kind) => t("batch.r2v.addCommon." + kind),
+        },
+        renderAsset: (section, item, card) => {
+            if (section.kind === "picture") {
+                card.classList.add("bd-batch-ref");
+                renderR2vRefSlot(card, item, item.slot, -1, editor);
+                card.onclick = () => uploadSegRef(editor, -1, item.slot);
+                bindBatchRefDrop(card, editor, -1, item.slot);
+                return;
+            }
+            if (section.kind === "video") {
+                renderVideoSlot(card, item, item.slot, -1, editor, { r2v: true });
+                card.onclick = (event) => {
+                    if (event.target.closest?.(".bd-r2v-play, .bd-r2v-dur, .bd-r2v-progress, .x, video, audio")) return;
+                    if (event.target.closest?.(".bd-r2v-thumb")) {
+                        card.querySelector(".bd-r2v-play")?.click();
+                        return;
+                    }
+                    uploadSegVideo(editor, -1, item.slot);
+                };
+                return;
+            }
+            renderAudioSlot(card, item, item.slot, -1, editor, { r2v: true });
+            card.onclick = (event) => {
+                if (event.target.closest?.(".bd-r2v-play, .bd-r2v-dur, .bd-r2v-progress, .x, video, audio")) return;
+                if (event.target.closest?.(".bd-r2v-thumb")) {
+                    card.querySelector(".bd-r2v-play")?.click();
+                    return;
+                }
+                uploadSegAudio(editor, -1, item.slot);
+            };
+        },
+        onAdd: (section, slot) => {
+            if (section.kind === "picture") uploadSegRef(editor, -1, slot);
+            else if (section.kind === "video") uploadSegVideo(editor, -1, slot);
+            else uploadSegAudio(editor, -1, slot);
+        },
+    });
 }
 
 function renderR2vRefSlot(el, ref, slot, index, editor) {
@@ -1646,20 +1697,16 @@ export function renderImageBatchGroups(editor) {
     list.innerHTML = "";
     syncR2vCommonToggleForTask(editor.r2vCommonToggle, {
         taskKey: key,
-        expanded: !!editor._r2vCommonExpanded,
+        expanded: !!editor._r2vCommonPopover?.isOpen,
         label: t("batch.r2v.commonReferences"),
         expandTitle: t("tooltip.r2vCommonExpand"),
         collapseTitle: t("tooltip.r2vCommonCollapse"),
     });
-    if (editor.r2vCommonPanel) {
-        editor.r2vCommonPanel.replaceChildren();
-        editor.r2vCommonPanel.classList.toggle("hidden", key !== "r2v" || !editor._r2vCommonExpanded);
-    }
     if (key === "r2v") {
         ensureR2vReferenceAssetSchema(editor.timeline);
-        if (editor._r2vCommonExpanded && editor.r2vCommonPanel) {
-            appendCommonPoolCard(editor.r2vCommonPanel, editor);
-        }
+        if (editor._r2vCommonPopover?.isOpen) editor._r2vCommonPopover.render();
+    } else {
+        editor._r2vCommonPopover?.close();
     }
     editor.timeline.segments.forEach((seg, index) => {
         const isR2v = key === "r2v";

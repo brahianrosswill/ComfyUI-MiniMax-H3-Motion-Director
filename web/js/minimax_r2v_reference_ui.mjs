@@ -14,38 +14,19 @@ export function formatR2vAssetStatusLabel(asset = {}, disabledLabel = "disabled"
     return `${name} · ${state}`;
 }
 
-export function configureR2vCommonPanel(panel) {
-    if (!panel?.style) throw new Error("R2V Common panel element is required.");
-    panel.style.width = "min(100%, 680px)";
-    panel.style.maxWidth = "680px";
-    panel.style.alignSelf = "flex-start";
-    panel.style.boxSizing = "border-box";
-    return panel;
-}
-
 export function mountR2vMediaLayout(card, {
     documentRef = globalThis.document,
-    commonOnly = false,
 } = {}) {
     requireDom(card, documentRef);
     const body = documentRef.createElement("div");
-    body.className = `bd-batch-r2v-body${commonOnly ? " bd-batch-r2v-body-assets-only" : ""}`;
+    body.className = "bd-batch-r2v-body";
     const assets = documentRef.createElement("div");
     assets.className = "bd-batch-r2v-assets";
     body.appendChild(assets);
 
-    let main = null;
-    if (commonOnly) {
-        card.classList?.add?.("bd-r2v-common-card");
-        card.style.width = "min(100%, 680px)";
-        card.style.maxWidth = "680px";
-        card.style.alignSelf = "flex-start";
-        card.style.boxSizing = "border-box";
-    } else {
-        main = documentRef.createElement("div");
-        main.className = "bd-batch-r2v-main";
-        body.appendChild(main);
-    }
+    const main = documentRef.createElement("div");
+    main.className = "bd-batch-r2v-main";
+    body.appendChild(main);
     card.appendChild(body);
     return { body, assets, main };
 }

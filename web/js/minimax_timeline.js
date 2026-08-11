@@ -1767,6 +1767,7 @@ class MiniMaxH3MotionDirectorEditor {
         this._directorModalOverlay = null;
         this._directorModalShell = null;
         this._directorModalContent = null;
+        this._directorOverlayLayer = null;
         this._directorModalOpen = false;
         this._directorModalKeyHandler = null;
         this._drawWidth = 0;
@@ -1781,7 +1782,7 @@ class MiniMaxH3MotionDirectorEditor {
             launcherHost: this.launcherContainer,
             translate: t,
             toggleLanguage: toggleLocale,
-            hasInternalDialog: () => !!this._modalEl,
+            hasInternalDialog: () => !!this._modalEl || !!this._r2vCommonPopover?.isOpen,
             onOpen: () => {
                 this._directorModalOpen = true;
                 this._resetLayoutStyles();
@@ -1792,6 +1793,7 @@ class MiniMaxH3MotionDirectorEditor {
             },
             onClose: () => {
                 if (this.isPlaying) this._stopPlay();
+                this._r2vCommonPopover?.close?.();
                 this._directorModalOpen = false;
                 refreshDirectorContinuityUi(this.node, this);
             },
@@ -1800,6 +1802,7 @@ class MiniMaxH3MotionDirectorEditor {
         this._directorModalOverlay = this._directorModalController.overlay;
         this._directorModalShell = this._directorModalController.shell;
         this._directorModalContent = this._directorModalController.content;
+        this._directorOverlayLayer = this._directorModalController.overlayLayer;
         this._directorModalKeyHandler = this._directorModalController.keyHandler;
         // Existing editor code measures `container`; it now means the page-root modal content,
         // never the LiteGraph node's compact launcher host.
@@ -3022,11 +3025,14 @@ class MiniMaxH3MotionDirectorEditor {
         this._promptMentionControllers = [];
         for (const controller of this._batchPromptMentionControllers || []) controller?.destroy?.();
         this._batchPromptMentionControllers = [];
+        this._r2vCommonPopover?.destroy?.();
+        this._r2vCommonPopover = null;
         this._directorModalController?.destroy();
         this._directorModalController = null;
         this._directorModalOverlay = null;
         this._directorModalShell = null;
         this._directorModalContent = null;
+        this._directorOverlayLayer = null;
         this._directorModalKeyHandler = null;
         this._directorModalOpen = false;
         this._previewVideo?.remove();
@@ -3856,7 +3862,7 @@ class MiniMaxH3MotionDirectorEditor {
         const isR2v = isBatch && taskKey === "r2v";
         syncR2vCommonToggleForTask(this.r2vCommonToggle, {
             taskKey,
-            expanded: !!this._r2vCommonExpanded,
+            expanded: !!this._r2vCommonPopover?.isOpen,
             label: t("batch.r2v.commonReferences"),
             expandTitle: t("tooltip.r2vCommonExpand"),
             collapseTitle: t("tooltip.r2vCommonCollapse"),
