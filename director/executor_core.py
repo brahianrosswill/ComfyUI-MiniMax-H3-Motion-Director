@@ -195,14 +195,13 @@ def _build_minimax_inputs(
     ref_video_audios = None
 
     if task_key == "fl2v":
-        if clip_frames is not None and clip_frames.shape[0] >= 1:
-            first_frame = clip_frames[:1]
-        if clip_frames is not None and clip_frames.shape[0] >= 2:
-            last_frame = clip_frames[-1:].clone()
-        if first_frame is None:
-            first_frame = _ref_tensor_from_seg_refs(seg.refs, 0)
-        if last_frame is None:
-            last_frame = _ref_tensor_from_seg_refs(seg.refs, 1)
+        from .fl2v_timeline import resolve_fl2v_endpoint_frames
+
+        first_frame, last_frame = resolve_fl2v_endpoint_frames(
+            explicit_first=_ref_tensor_from_seg_refs(seg.refs, 0),
+            explicit_last=_ref_tensor_from_seg_refs(seg.refs, 1),
+            clip_frames=clip_frames,
+        )
     elif task_key == "i2v":
         if prev_tail is not None and prev_tail.shape[0] > 0:
             first_frame = prev_tail[-1:].clone()

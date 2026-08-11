@@ -66,6 +66,26 @@ def _image_ref_from_raw(raw: Any) -> dict[str, Any] | None:
     }
 
 
+def resolve_fl2v_endpoint_frames(
+    *,
+    explicit_first: torch.Tensor | None,
+    explicit_last: torch.Tensor | None,
+    clip_frames: torch.Tensor | None,
+) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """Resolve FL2V endpoints without ever turning image1 into a fake image0."""
+    first_frame = explicit_first
+    last_frame = explicit_last
+    if first_frame is None and last_frame is None and clip_frames is not None:
+        if int(clip_frames.shape[0]) >= 1:
+            first_frame = clip_frames[:1]
+        if int(clip_frames.shape[0]) >= 2:
+            last_frame = clip_frames[-1:].clone()
+    elif first_frame is not None and last_frame is None and clip_frames is not None:
+        if int(clip_frames.shape[0]) >= 2:
+            last_frame = clip_frames[-1:].clone()
+    return first_frame, last_frame
+
+
 def _normalize_shots(raw_shots: list | None, *, frame_rate: float = 24.0) -> list[dict[str, Any]]:
     """Normalize explicit shots[] groups. Skips shots with neither start nor end image."""
     out: list[dict[str, Any]] = []
@@ -413,6 +433,7 @@ def _normalize_keyframes(raw: list[dict] | None) -> list[dict]:
                 or DEFAULT_FL2V_NEGATIVE,
                 "isStartFrame": is_start,
                 "isEndFrame": is_end,
+                "endOnly": _as_bool(item.get("endOnly") or item.get("end_only")),
                 "_breakBefore": _as_bool(
                     item.get("breakBefore") or item.get("break_before") or item.get("disconnect")
                 ),
@@ -470,19 +491,32 @@ def _expand_shots(keyframes: list[dict]) -> list[dict[str, Any]]:
         if not kf.get("isStartFrame"):
             continue
         if kf.get("isEndFrame"):
-            # Self-paired 首尾同图: sample this clip alone.
             fc = _shot_sample_frame_count(kf, None)
-            shots.append(
-                {
-                    "source_index": i,
-                    "start": kf,
-                    "end": kf,
-                    "frameCount": fc,
-                    "timeline_start": int(kf.get("start") or 0),
-                    "prompt": kf.get("prompt") or "",
-                    "negativePrompt": kf.get("negativePrompt") or DEFAULT_FL2V_NEGATIVE,
-                }
-            )
+            if kf.get("endOnly"):
+                shots.append(
+                    {
+                        "source_index": i,
+                        "start": None,
+                        "end": kf,
+                        "frameCount": fc,
+                        "timeline_start": int(kf.get("start") or 0),
+                        "prompt": kf.get("prompt") or "",
+                        "negativePrompt": kf.get("negativePrompt") or DEFAULT_FL2V_NEGATIVE,
+                    }
+                )
+            else:
+                # Self-paired 首尾同图: sample this clip alone.
+                shots.append(
+                    {
+                        "source_index": i,
+                        "start": kf,
+                        "end": kf,
+                        "frameCount": fc,
+                        "timeline_start": int(kf.get("start") or 0),
+                        "prompt": kf.get("prompt") or "",
+                        "negativePrompt": kf.get("negativePrompt") or DEFAULT_FL2V_NEGATIVE,
+                    }
+                )
             continue
         end = None
         for j in range(i + 1, n):

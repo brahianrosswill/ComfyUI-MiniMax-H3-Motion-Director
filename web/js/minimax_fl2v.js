@@ -25,6 +25,7 @@ import {
     roundDurationSec,
 } from "./minimax_gen_timeline.js";
 import { t } from "./minimax_i18n.js";
+import { resolveFl2vEndpointState } from "./minimax_fl2v_state.mjs";
 
 export const FL2V_STYLES = `
 .bd-fl2v-detail-wrap{width:100%;box-sizing:border-box;display:flex;flex-direction:column;gap:8px}
@@ -53,12 +54,13 @@ export const FL2V_STYLES = `
 .bd-fl2v-slot.drag-over{border-color:#4fff8f;border-style:solid;background:#152018}
 .bd-fl2v-slot.dragging{opacity:.45}
 .bd-fl2v-slot img{height:100%;width:auto;max-height:100%;display:block;pointer-events:none;flex-shrink:0}
-.bd-fl2v-slot .tag{position:absolute;left:4px;top:4px;padding:1px 5px;border-radius:2px;font-size:9px;font-weight:700;line-height:1.4;pointer-events:none}
-.bd-fl2v-slot .tag.start{background:rgba(79,255,143,.92);color:#111}
-.bd-fl2v-slot .tag.end{background:rgba(240,160,48,.92);color:#111}
+.bd-fl2v-slot .tag{position:absolute;top:4px;padding:1px 5px;border-radius:2px;font-size:9px;font-weight:700;line-height:1.4;pointer-events:none;z-index:2}
+.bd-fl2v-slot .tag.start{left:4px;right:auto;background:rgba(79,255,143,.92);color:#111}
+.bd-fl2v-slot .tag.end{left:auto;right:4px;background:rgba(240,160,48,.92);color:#111}
 .bd-fl2v-slot .ph{color:#666;font-size:10px;text-align:center;padding:4px;line-height:1.35;pointer-events:none}
 /* Clear sits outside the draggable slot so HTML5 DnD cannot steal the click. */
 .bd-fl2v-slot-wrap .x{position:absolute;right:1px;top:1px;width:24px;height:24px;padding:0;margin:0;border:0;box-sizing:border-box;display:none;align-items:center;justify-content:center;border-radius:4px;background:rgba(0,0,0,.78);color:#ff8a8a;font-size:18px;font-weight:700;line-height:1;cursor:pointer;z-index:6;user-select:none;-webkit-user-select:none;font-family:inherit;appearance:none;-webkit-appearance:none}
+.bd-fl2v-slot-wrap:has([data-slot="end"]) .x{left:1px;right:auto}
 .bd-fl2v-slot-wrap.has-img:hover .x,
 .bd-fl2v-slot-wrap:focus-within .x{display:flex}
 @media (hover:none){.bd-fl2v-slot-wrap.has-img .x{display:flex}}
@@ -253,6 +255,7 @@ export function flattenFl2vShotsToSegments(editor) {
         const fc = shotFrameCount(shot, fps);
         const startImage = shot.startImage || null;
         const endImage = shot.endImage || null;
+        const endpoints = resolveFl2vEndpointState(shot);
         const seg = {
             id: shot.id || uid(),
             start: cursor,
@@ -263,15 +266,18 @@ export function flattenFl2vShotsToSegments(editor) {
             negativePrompt: shot.negativePrompt || DEFAULT_FL2V_NEGATIVE,
             taskType: "",
             refs: [],
-            isStartFrame: true,
-            isEndFrame: !!endImage?.imageFile,
+            isStartFrame: endpoints.hasStart,
+            isEndFrame: endpoints.hasEnd,
+            endOnly: endpoints.endOnly,
             shotIndex: i,
-            genImage: {
-                imageFile: startImage?.imageFile || endImage?.imageFile || "",
-                width: startImage?.width || endImage?.width || 0,
-                height: startImage?.height || endImage?.height || 0,
-            },
-            imageFile: startImage?.imageFile || endImage?.imageFile || "",
+            genImage: endpoints.hasStart
+                ? {
+                    imageFile: startImage.imageFile || "",
+                    width: startImage.width || 0,
+                    height: startImage.height || 0,
+                }
+                : { imageFile: "", width: 0, height: 0 },
+            imageFile: endpoints.startFile,
             endImage: endImage
                 ? {
                     imageFile: endImage.imageFile || "",
@@ -297,7 +303,8 @@ export function flattenFl2vShotsToKeyframes(editor) {
         const fc = shotFrameCount(shot, fps);
         const startImage = shot.startImage;
         const endImage = shot.endImage;
-        if (endImage?.imageFile) {
+        const endpoints = resolveFl2vEndpointState(shot);
+        if (endpoints.hasStart && endpoints.hasEnd) {
             const half = Math.max(minFrameCount("fl2v"), Math.floor(fc / 2));
             const eLen = Math.max(minFrameCount("fl2v"), fc - half);
             const sLen = fc - eLen;
@@ -328,6 +335,22 @@ export function flattenFl2vShotsToKeyframes(editor) {
                 negativePrompt: shot.negativePrompt || DEFAULT_FL2V_NEGATIVE,
                 isStartFrame: false,
                 isEndFrame: true,
+            });
+        } else if (endpoints.endOnly) {
+            keyframes.push({
+                id: shot.id || uid(),
+                imageFile: endImage.imageFile || "",
+                width: endImage.width || 0,
+                height: endImage.height || 0,
+                start: cursor,
+                length: fc,
+                frameCount: fc,
+                durationSec: shot.durationSec,
+                prompt: shot.prompt || "",
+                negativePrompt: shot.negativePrompt || DEFAULT_FL2V_NEGATIVE,
+                isStartFrame: true,
+                isEndFrame: true,
+                endOnly: true,
             });
         } else {
             keyframes.push({
@@ -707,6 +730,7 @@ export function stripFl2vPromptBody(text) {
     const wraps = [
         "完全保持首尾帧。",
         "完全保持首帧。",
+        "完全保持尾帧。",
         "视频开始完全按照image0的画面，不修改，视频结束完全保持image1的画面。",
         "视频开始完全按照image0的画面，不修改，视频结束完全保持image1。",
         "视频开始完全按照image0的构图，不修改，视频结束完全保持image1。",
@@ -716,8 +740,11 @@ export function stripFl2vPromptBody(text) {
         "视频结束完全保持image1。",
         "完全保持首尾帧：开头必须是image0，结尾必须是image1。",
         "完全保持首帧：开头必须是image0。",
+        "完全保持尾帧：结尾锁定尾帧。",
+        "完全保持首尾帧：开头锁定首帧，结尾锁定尾帧。",
         "再次强调：开头锁定image0，结尾锁定image1。",
         "再次强调：开头锁定image0。",
+        "再次强调：结尾锁定尾帧。",
         "中间过程：",
     ];
     let changed = true;
@@ -1037,11 +1064,8 @@ function renderFl2vShotCards(editor) {
         const startUrl = shot.startImage?.imageFile ? fl2vViewUrl(shot.startImage.imageFile) : "";
         const endUrl = shot.endImage?.imageFile ? fl2vViewUrl(shot.endImage.imageFile) : "";
         const fc = shotFrameCount(shot, fl2vFps(editor));
-        const badge = shot.startImage?.imageFile && shot.endImage?.imageFile
-            ? t("fl2v.badge.startEnd")
-            : (shot.endImage?.imageFile && !shot.startImage?.imageFile
-                ? t("fl2v.badge.startEnd")
-                : t("fl2v.badge.i2v"));
+        const endpoints = resolveFl2vEndpointState(shot);
+        const badge = t(endpoints.badgeKey);
         card.innerHTML = `
             <div class="bd-fl2v-shot-head">
                 <b>${t("panel.fl2v.shotN", { n: i + 1 })}</b>
@@ -1050,14 +1074,14 @@ function renderFl2vShotCards(editor) {
             <div class="bd-fl2v-slots">
                 <div class="bd-fl2v-slot-wrap${startUrl ? " has-img" : ""}">
                     <div class="bd-fl2v-slot${startUrl ? " has-img" : ""}" data-slot="start" title="${t("tooltip.fl2vStartSlot")}">
-                        <span class="tag start">${t("fl2v.tag.start")}</span>
+                        ${startUrl ? `<span class="tag start">${t("fl2v.tag.start")}</span>` : ""}
                         ${startUrl ? `<img src="${startUrl}" alt="">` : `<span class="ph">${t("panel.fl2v.startRequired")}</span>`}
                     </div>
                     ${startUrl ? `<button type="button" class="x" data-clear="start" title="${t("tooltip.fl2vClear")}" draggable="false">×</button>` : ""}
                 </div>
                 <div class="bd-fl2v-slot-wrap${endUrl ? " has-img" : ""}">
                     <div class="bd-fl2v-slot${endUrl ? " has-img" : ""}" data-slot="end" title="${t("tooltip.fl2vEndSlot")}">
-                        <span class="tag end">${t("fl2v.tag.end")}</span>
+                        ${endUrl ? `<span class="tag end">${t("fl2v.tag.end")}</span>` : ""}
                         ${endUrl ? `<img src="${endUrl}" alt="">` : `<span class="ph">${t("panel.fl2v.endOptional")}</span>`}
                     </div>
                     ${endUrl ? `<button type="button" class="x" data-clear="end" title="${t("tooltip.fl2vClear")}" draggable="false">×</button>` : ""}
@@ -1266,11 +1290,9 @@ export function drawFl2vSegmentThumbnails(editor, ctx, seg, startX, pxWidth, y0,
     ctx.fillStyle = "#0d0d0d";
     ctx.fillRect(startX, y0 + 1, pxWidth, h - 2);
 
-    const imageFile = seg.genImage?.imageFile
-        || seg.imageFile
-        || seg.endImage?.imageFile
-        || "";
-    if (!imageFile) {
+    const startFile = seg.genImage?.imageFile || seg.imageFile || "";
+    const endFile = seg.endImage?.imageFile || "";
+    if (!startFile && !endFile) {
         ctx.fillStyle = "#666";
         ctx.font = "12px sans-serif";
         ctx.textAlign = "center";
@@ -1318,24 +1340,28 @@ export function drawFl2vSegmentThumbnails(editor, ctx, seg, startX, pxWidth, y0,
         return null;
     };
 
-    const img = ensureThumb(imageFile);
-    if (!img) {
+    const startImg = startFile ? ensureThumb(startFile) : null;
+    const endImg = endFile ? ensureThumb(endFile) : null;
+    if ((startFile && !startImg) || (endFile && !endImg && !startFile)) {
         ctx.restore();
         return;
     }
 
-    const endFile = seg.endImage?.imageFile || "";
     const trackH = Math.max(1, h - 2);
     const drawY = y0 + 1;
-    // 首尾帧：占位左右各一半
-    const split = !!endFile && pxWidth > 24;
+    const hasStart = !!startFile;
+    const hasEnd = !!endFile;
+    const split = hasStart && hasEnd && pxWidth > 24;
     const halfW = split ? pxWidth / 2 : pxWidth;
     const mainW = halfW;
     const endW = split ? pxWidth - halfW : 0;
-    drawImg(img, startX, mainW, drawY, trackH);
+    if (hasStart && startImg) {
+        drawImg(startImg, startX, mainW, drawY, trackH);
+    } else if (hasEnd && endImg) {
+        drawImg(endImg, startX, pxWidth, drawY, trackH);
+    }
 
     if (split) {
-        const endImg = ensureThumb(endFile);
         const ex = startX + mainW;
         if (endImg) {
             drawImg(endImg, ex, endW, drawY, trackH);
@@ -1354,14 +1380,16 @@ export function drawFl2vSegmentThumbnails(editor, ctx, seg, startX, pxWidth, y0,
     ctx.font = "bold 9px sans-serif";
     ctx.textAlign = "left";
     ctx.textBaseline = "middle";
-    const startBadgeW = Math.max(38, Math.ceil(ctx.measureText(startTag).width) + 12);
-    ctx.fillStyle = "rgba(79,255,143,0.92)";
-    ctx.fillRect(startX + 4, badgeY, startBadgeW, 14);
-    ctx.fillStyle = "#111";
-    ctx.fillText(startTag, startX + 8, badgeY + 7);
-    if (endFile) {
-        const endBadgeX = startX + mainW + 4;
+    if (hasStart) {
+        const startBadgeW = Math.max(38, Math.ceil(ctx.measureText(startTag).width) + 12);
+        ctx.fillStyle = "rgba(79,255,143,0.92)";
+        ctx.fillRect(startX + 4, badgeY, startBadgeW, 14);
+        ctx.fillStyle = "#111";
+        ctx.fillText(startTag, startX + 8, badgeY + 7);
+    }
+    if (hasEnd) {
         const endBadgeW = Math.max(30, Math.ceil(ctx.measureText(endTag).width) + 10);
+        const endBadgeX = startX + pxWidth - endBadgeW - 4;
         ctx.fillStyle = "rgba(240,160,48,0.92)";
         ctx.fillRect(endBadgeX, badgeY, endBadgeW, 14);
         ctx.fillStyle = "#111";
@@ -1414,8 +1442,9 @@ export function buildFl2vPayloadFields(editor) {
             durationSec: s.durationSec,
             prompt: s.prompt || "",
             negativePrompt: s.negativePrompt || DEFAULT_FL2V_NEGATIVE,
-            isStartFrame: true,
+            isStartFrame: !!(s.genImage?.imageFile || s.imageFile),
             isEndFrame: !!s.endImage?.imageFile,
+            endOnly: !!s.endImage?.imageFile && !(s.genImage?.imageFile || s.imageFile),
             genImage: {
                 imageFile: s.genImage?.imageFile || s.imageFile || "",
                 width: s.genImage?.width || 0,
