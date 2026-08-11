@@ -29,9 +29,11 @@ class MotionContextCacheError(RuntimeError):
 
 @dataclass(frozen=True)
 class CachedMotionContext:
-    frames: torch.Tensor
+    frames: torch.Tensor | None
     audio: dict[str, Any] | None
     metadata: dict[str, Any]
+    latent: dict[str, Any] | None = None
+    handoff: dict[str, Any] | None = None
 
 
 def _sha_json(value: Any) -> str:

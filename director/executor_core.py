@@ -51,6 +51,12 @@ from .motion_context import (
     apply_exported_motion_context,
     select_context_span,
 )
+from .latent_context_cache import (
+    LATENT_HANDOFF_PIPELINE,
+    av_latent_to_cpu,
+    load_latent_context_cache,
+    save_latent_context_cache,
+)
 from .audio_export import (
     AUDIO_MODE_GENERATE,
     AUDIO_MODE_MUTE,
@@ -422,6 +428,7 @@ def execute_director_plan_core(
     nominal_generated_frames: dict[int, torch.Tensor] = {}
     reports: list[str] = [plan_summary(plan), "", "Execution path: ComfyUI official MiniMax H3"]
     reports.append(f"Motion Context: {'ON' if motion_enabled else 'OFF'}")
+    reports.append(f"Motion Context handoff: {LATENT_HANDOFF_PIPELINE} (latent-first)")
     reports.append(f"Context frames: {requested_context}")
     reports.append(f"Source Bridge frames: {requested_source_bridge} (V2V/RV2V only)")
     if source_bridge_pairs:
@@ -668,15 +675,47 @@ def execute_director_plan_core(
                         "context cache."
                         % (timeline_slot + 1, previous_index + 1)
                     )
-                context_entry = load_motion_context_cache(
+                pixel_context = load_motion_context_cache(
                     node_id,
                     previous_seg,
                     plan,
                     settings=cache_settings,
-                    strict=True,
+                    strict=False,
                 )
+                latent_context = load_latent_context_cache(
+                    node_id,
+                    previous_seg,
+                    plan,
+                    settings=cache_settings,
+                )
+                if pixel_context is None and latent_context is None:
+                    raise ValueError(
+                        "Segment %d requires a valid generated result from Segment %d "
+                        "for Motion Context. Run the previous segment or the full sequence "
+                        "to build its AV latent / exported RGB cache."
+                        % (timeline_slot + 1, previous_index + 1)
+                    )
+                context_entry = CachedMotionContext(
+                    frames=pixel_context.frames if pixel_context is not None else None,
+                    audio=pixel_context.audio if pixel_context is not None else None,
+                    metadata=(
+                        pixel_context.metadata
+                        if pixel_context is not None
+                        else latent_context.metadata
+                    ),
+                    latent=latent_context.latent if latent_context is not None else None,
+                    handoff=latent_context.handoff if latent_context is not None else None,
+                )
+            available_context_frames = int(
+                (context_entry.handoff or {}).get("export_frames")
+                or (
+                    context_entry.frames.shape[0]
+                    if isinstance(context_entry.frames, torch.Tensor)
+                    else 0
+                )
+            )
             context_span = select_context_span(
-                requested_context, int(context_entry.frames.shape[0])
+                requested_context, available_context_frames
             )
             if context_span != requested_context:
                 reports.append(
@@ -817,6 +856,10 @@ def execute_director_plan_core(
                 latent=latent,
                 context_frames=context_entry.frames,
                 context_audio=context_entry.audio,
+                context_latent=context_entry.latent,
+                context_end_frame=int(
+                    (context_entry.handoff or {}).get("context_end_frame") or 0
+                ) or None,
                 context_span=context_span,
                 target_frame_count=target_len,
                 generation_frame_count=num_frames,
@@ -911,6 +954,15 @@ def execute_director_plan_core(
         )
 
         chunk = decoded.cpu().float()
+        handoff = {
+            # Exclusive endpoint on the sampled timeline. Alignment frames after
+            # this coordinate are internal overshoot, never continuation input.
+            "context_end_frame": int(context_span + target_len),
+            "trim_frames": int(context_span),
+            "export_frames": int(target_len),
+            "sample_frames": int(num_frames),
+        }
+        sampled_context_latent = av_latent_to_cpu(samples)
         if audio_has_samples(audio_dict):
             audio_dict = {
                 "waveform": audio_dict["waveform"].detach().cpu(),
@@ -930,6 +982,18 @@ def execute_director_plan_core(
                     f"Segment {ui_idx + 1}: Motion Context cache write failed; "
                     "selection-run continuation from this segment will be unavailable."
                 )
+            if not save_latent_context_cache(
+                node_id,
+                seg,
+                plan,
+                latent=sampled_context_latent,
+                handoff=handoff,
+                settings=cache_settings,
+            ):
+                reports.append(
+                    f"Segment {ui_idx + 1}: AV latent handoff cache write failed; "
+                    "selection-run will use exported RGB/audio fallback if available."
+                )
         completed_outputs[seg.index] = chunk
         completed_contexts[timeline_slot] = CachedMotionContext(
             frames=chunk,
@@ -941,6 +1005,8 @@ def execute_director_plan_core(
                 "height": int(chunk.shape[1]),
                 "segment_index": int(seg.index),
             },
+            latent=sampled_context_latent,
+            handoff=handoff,
         )
 
         if (
@@ -991,6 +1057,8 @@ def execute_director_plan_core(
         else:
             reports.append(
                 f"Segment {ui_idx + 1}: context source = Segment {ui_idx}; "
+                f"visual source = {motion_info.visual_source}; "
+                f"audio source = {motion_info.audio_source}; "
                 f"video context = {motion_info.context_frames} frames; "
                 f"audio context = {motion_info.audio_seconds:.3f}s; "
                 f"removed start anchors = {motion_info.removed_start_anchors}; "
@@ -1024,6 +1092,14 @@ def execute_director_plan_core(
             continue
 
         cached_context = None
+        cached_latent_context = None
+        if motion_enabled:
+            cached_latent_context = load_latent_context_cache(
+                node_id,
+                seg,
+                plan,
+                settings=cache_settings,
+            )
         if source_bridge_enabled(seg.task_key, requested_source_bridge):
             # Source Bridge anchors require the nominal generated segment cache,
             # never an exported Motion Context tail or source passthrough.
@@ -1046,6 +1122,19 @@ def execute_director_plan_core(
             cached = cached_context.frames if cached_context is not None else None
         else:
             cached = load_segment_cache(node_id, seg, plan)
+        if cached_latent_context is not None:
+            cached_context = CachedMotionContext(
+                frames=cached_context.frames if cached_context is not None else None,
+                audio=cached_context.audio if cached_context is not None else None,
+                metadata=(
+                    cached_context.metadata
+                    if cached_context is not None
+                    else cached_latent_context.metadata
+                ),
+                latent=cached_latent_context.latent,
+                handoff=cached_latent_context.handoff,
+            )
+            completed_contexts[int(seg.timeline_index)] = cached_context
         if cached is not None:
             cached = cached.float()
             if source_bridge_enabled(seg.task_key, requested_source_bridge):

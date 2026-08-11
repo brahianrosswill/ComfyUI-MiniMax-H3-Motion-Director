@@ -34,6 +34,9 @@ class MotionContextInfo:
     removed_start_anchors: int
     preserved_last_anchors: int
     color_reanchor_status: str = "OFF"
+    visual_source: str = "pixels (fallback)"
+    audio_source: str = "off"
+    context_end_frame: int = 0
 
 
 def pixel_frames_for_latent_steps(latent_t: int) -> int:
@@ -47,6 +50,105 @@ def latent_step_offsets(latent_t: int) -> list[int]:
         out.append(cursor)
         cursor += FRAME_PER_TOKEN[i % len(FRAME_PER_TOKEN)]
     return out
+
+
+def _steps_for_context_span(span: int) -> int:
+    wanted = int(span)
+    for steps in range(1, 256):
+        covered = pixel_frames_for_latent_steps(steps)
+        if covered == wanted:
+            return steps
+        if covered > wanted:
+            break
+    raise ValueError(
+        "Motion Director: %d context frames do not map to whole H3 latent blocks."
+        % wanted
+    )
+
+
+def video_context_from_latent(
+    context_latent: dict[str, Any],
+    *,
+    span: int,
+    context_end_frame: int | None = None,
+) -> tuple[list[torch.Tensor], list[int], int]:
+    """Select latent blocks ending at/before the real exported endpoint.
+
+    ``context_end_frame`` is exclusive on the sampled pixel timeline.  Aligned
+    H3 sampling may extend beyond it; those overshoot blocks are never selected.
+    Returns blocks, destination offsets, and the selected source endpoint.
+    """
+    video = _latent_video_stream(context_latent)
+    total_steps = int(video.shape[2])
+    needed_steps = _steps_for_context_span(span)
+    sample_frames = pixel_frames_for_latent_steps(total_steps)
+    end_limit = sample_frames if context_end_frame is None else min(
+        sample_frames, max(0, int(context_end_frame))
+    )
+    end_step = 0
+    selected_end = 0
+    for steps in range(1, total_steps + 1):
+        endpoint = pixel_frames_for_latent_steps(steps)
+        if endpoint > end_limit:
+            break
+        end_step = steps
+        selected_end = endpoint
+    if end_step < needed_steps:
+        raise ValueError(
+            "Motion Director: previous AV latent has no %d-frame context window "
+            "ending at/before exported frame %d." % (int(span), end_limit)
+        )
+    start_step = end_step - needed_steps
+    blocks = [
+        video[:1, :, step : step + 1].clone()
+        for step in range(start_step, end_step)
+    ]
+    return blocks, latent_step_offsets(needed_steps), selected_end
+
+
+def _latent_audio_stream(latent: dict[str, Any]) -> torch.Tensor:
+    samples = latent.get("samples") if isinstance(latent, dict) else None
+    if hasattr(samples, "unbind"):
+        streams = list(samples.unbind())
+    elif isinstance(samples, (tuple, list)):
+        streams = list(samples)
+    else:
+        streams = []
+    if len(streams) < 2:
+        raise ValueError("Motion Director: previous AV latent has no audio stream.")
+    audio = streams[1]
+    if audio.ndim != 4:
+        raise ValueError(
+            "Motion Director: H3 audio latent must be [B,C,2,T], got %s."
+            % (tuple(audio.shape),)
+        )
+    return audio
+
+
+def _audio_context_from_latent(
+    context_latent: dict[str, Any],
+    *,
+    span: int,
+    context_end_frame: int | None,
+) -> tuple[dict[str, Any], int]:
+    audio = _latent_audio_stream(context_latent)
+    total_steps = int(audio.shape[-1])
+    end_step = total_steps if context_end_frame is None else min(
+        total_steps,
+        max(0, int(round(float(context_end_frame) / FPS * AUDIO_LATENT_HZ))),
+    )
+    wanted_steps = max(1, int(round(float(span) / FPS * AUDIO_LATENT_HZ)))
+    if end_step < wanted_steps:
+        raise ValueError(
+            "Motion Director: previous AV latent audio is shorter than the requested context."
+        )
+    encoded = audio[..., end_step - wanted_steps : end_step].clone()
+    return {
+        "kind": "audio",
+        "ref_audio_t": wanted_steps,
+        "audio_latent": encoded,
+        MC_AUDIO_KEY: float(span),
+    }, wanted_steps
 
 
 def select_context_span(requested: int, available: int) -> int:
@@ -299,8 +401,10 @@ def apply_exported_motion_context(
     video_vae,
     audio_vae,
     latent: dict[str, Any],
-    context_frames: torch.Tensor,
+    context_frames: torch.Tensor | None,
     context_audio: dict[str, Any] | None,
+    context_latent: dict[str, Any] | None = None,
+    context_end_frame: int | None = None,
     context_span: int,
     target_frame_count: int,
     generation_frame_count: int,
@@ -338,24 +442,75 @@ def apply_exported_motion_context(
             "Motion Director: requested output end is outside the aligned H3 timeline."
         )
 
-    motion_keyframes, block_count, color_status = _encode_video_context(
-        video_vae,
-        context_frames,
-        width=width,
-        height=height,
-        span=int(context_span),
-        color_reanchor_enabled=bool(color_reanchor_enabled),
-        color_anchor=color_anchor,
-        task_key=task_key,
-    )
+    selected_context_end = int(context_end_frame or 0)
+    if context_latent is not None and not color_reanchor_enabled:
+        source_video = _latent_video_stream(context_latent)
+        source_width = int(source_video.shape[-1]) * 16
+        source_height = int(source_video.shape[-2]) * 16
+        if (source_width, source_height) != (width, height):
+            raise ValueError(
+                "Motion Director: cached context latent is %dx%d but the current "
+                "segment is %dx%d. Regenerate the previous segment at this canvas."
+                % (source_width, source_height, width, height)
+            )
+        blocks, offsets, selected_context_end = video_context_from_latent(
+            context_latent,
+            span=int(context_span),
+            context_end_frame=context_end_frame,
+        )
+        motion_keyframes = [
+            {
+                "resolved_frame_index": 0,
+                MC_KEY: int(offset),
+                "latent": block,
+            }
+            for block, offset in zip(blocks, offsets)
+        ]
+        block_count = len(blocks)
+        color_status = "OFF"
+        visual_source = "latent"
+    else:
+        if not isinstance(context_frames, torch.Tensor) or int(context_frames.shape[0]) <= 0:
+            reason = "Color Re-anchor" if color_reanchor_enabled else "pixel fallback"
+            raise ValueError(
+                f"Motion Director: {reason} requires cached exported RGB frames."
+            )
+        motion_keyframes, block_count, color_status = _encode_video_context(
+            video_vae,
+            context_frames,
+            width=width,
+            height=height,
+            span=int(context_span),
+            color_reanchor_enabled=bool(color_reanchor_enabled),
+            color_anchor=color_anchor,
+            task_key=task_key,
+        )
+        visual_source = (
+            "pixels (Color Re-anchor)" if color_reanchor_enabled else "pixels (fallback)"
+        )
+        selected_context_end = int(context_end_frame or int(context_frames.shape[0]))
     motion_audio_ref = None
     audio_steps = 0
+    audio_source = "off"
     if audio_enabled:
-        if audio_vae is None:
-            raise ValueError("Motion Director: Motion Audio Context requires audio_vae.")
-        motion_audio_ref, audio_steps = _encode_audio_context(
-            audio_vae, context_audio, span=int(context_span)
-        )
+        if context_latent is not None:
+            try:
+                motion_audio_ref, audio_steps = _audio_context_from_latent(
+                    context_latent,
+                    span=int(context_span),
+                    context_end_frame=selected_context_end or context_end_frame,
+                )
+                audio_source = "latent"
+            except ValueError:
+                if context_audio is None:
+                    raise
+        if motion_audio_ref is None:
+            if audio_vae is None:
+                raise ValueError("Motion Director: Motion Audio Context requires audio_vae.")
+            motion_audio_ref, audio_steps = _encode_audio_context(
+                audio_vae, context_audio, span=int(context_span)
+            )
+            audio_source = "waveform (fallback)"
 
     merged, removed, preserved = merge_motion_conditioning(
         conditioning,
@@ -372,6 +527,9 @@ def apply_exported_motion_context(
         removed_start_anchors=removed,
         preserved_last_anchors=preserved,
         color_reanchor_status=color_status,
+        visual_source=visual_source,
+        audio_source=audio_source,
+        context_end_frame=selected_context_end,
     )
     return merged, info
 
@@ -383,4 +541,5 @@ __all__ = [
     "merge_motion_conditioning",
     "pixel_frames_for_latent_steps",
     "select_context_span",
+    "video_context_from_latent",
 ]
