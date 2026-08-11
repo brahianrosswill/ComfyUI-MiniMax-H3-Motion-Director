@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { setLocale, t } from "../web/js/minimax_i18n.js";
 
 import {
@@ -147,6 +148,23 @@ test("disabled Common asset status is localized", () => {
     assert.equal(t("batch.r2v.disabled"), "已关闭");
     setLocale("en");
     assert.equal(t("batch.r2v.disabled"), "disabled");
+});
+
+test("disabled Common mention commits after its semantic token is inserted", () => {
+    const source = readFileSync(new URL("../web/js/minimax_image_batch.js", import.meta.url), "utf8");
+    const enableStart = source.indexOf("onEnableAsset: (item) => {");
+    const insertedStart = source.indexOf("onMentionInserted: (_item, { wasDisabled }) => {", enableStart);
+    const callbackEnd = source.indexOf("            });", insertedStart);
+    assert.ok(enableStart >= 0 && insertedStart > enableStart && callbackEnd > insertedStart);
+
+    const enableBlock = source.slice(enableStart, insertedStart);
+    const insertedBlock = source.slice(insertedStart, callbackEnd);
+    assert.doesNotMatch(enableBlock, /editor\.commit\s*\(/);
+    assert.match(insertedBlock, /editor\.commit\(true, \{ syncTimeline: true \}\)/);
+    assert.ok(
+        insertedBlock.indexOf("editor.commit") < insertedBlock.indexOf("setTimeout"),
+        "the enabled state and inserted token must commit before the prompt cards are rebuilt",
+    );
 });
 
 test("Local asset card labels follow the current effective tag", () => {

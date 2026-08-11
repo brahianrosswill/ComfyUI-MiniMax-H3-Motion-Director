@@ -1910,15 +1910,20 @@ export function renderImageBatchGroups(editor) {
                     const common = editor.timeline.r2vCommon || {};
                     const commonIds = allKnownReferenceAssets(common).map((asset) => asset.assetId);
                     if (!setCommonAssetEnabled(seg, commonIds, item.assetId, true)) return null;
-                    // Preserve the live mention range: serialize the changed selection
-                    // without rebuilding/destroying this prompt controller yet.
-                    editor.commit(true, { syncTimeline: true });
+                    // Do not normalize/commit yet: normalizeImageBatchSegments()
+                    // replaces segment objects. The rich editor must first write the
+                    // semantic token into this live segment, then both changes are
+                    // serialized atomically by onMentionInserted below.
                     return referenceAssetStates(common, seg).find((asset) => (
                         asset.kind === item.kind && asset.assetId === item.assetId
                     ));
                 },
                 onMentionInserted: (_item, { wasDisabled }) => {
                     if (!wasDisabled) return;
+                    // syncTextarea() has already updated seg.prompt at this point.
+                    // Commit after insertion so normalization copies both the newly
+                    // enabled asset and the semantic prompt token into the live plan.
+                    editor.commit(true, { syncTimeline: true });
                     setTimeout(() => {
                         if (!editor._destroyed) editor.renderImageBatchGroups?.();
                     }, 0);
