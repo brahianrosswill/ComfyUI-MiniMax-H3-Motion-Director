@@ -105,6 +105,10 @@ import {
     syncR2vCommonToggleForTask,
 } from "./minimax_r2v_common_ui.mjs";
 import {
+    commitRunSelectionMutation as commitRunSelectionMutationNow,
+    ensureRunSelectionSerialized,
+} from "./minimax_run_selection.mjs";
+import {
     VIDEO_CONTINUITY_STRATEGIES,
     applyVideoStrategyToWidgets,
     migrateColorReanchorWidgetValues,
@@ -3215,52 +3219,68 @@ class MiniMaxH3MotionDirectorEditor {
             const n = this.getRunnableSegmentCount();
             if (index < 0 || index >= n) return;
         }
-        const sel = new Set(this.timeline.runSelection || []);
-        if (sel.has(index)) sel.delete(index);
-        else sel.add(index);
-        this.timeline.runSelection = [...sel].sort((a, b) => a - b);
-        this.updateRunSelectUI();
-        this.commit(this.isImageBatch(), { syncTimeline: true });
-        if (this.isImageBatch()) this.renderImageBatchGroups();
-        else this.scheduleRender();
+        this.commitRunSelectionMutation(() => {
+            const sel = new Set(this.timeline.runSelection || []);
+            if (sel.has(index)) sel.delete(index);
+            else sel.add(index);
+            this.timeline.runSelection = [...sel].sort((a, b) => a - b);
+        });
     }
 
     toggleRunSelectMode() {
         if (!this.supportsRunSelect()) return;
-        this.timeline.runSelectEnabled = !this.timeline.runSelectEnabled;
-        if (this.timeline.runSelectEnabled) {
-            if (!(this.timeline.runSelection || []).length) {
-                if (this.isFl2vMode()) {
-                    this.timeline.runSelection = fl2vStartIndices(this);
+        this.commitRunSelectionMutation(() => {
+            this.timeline.runSelectEnabled = !this.timeline.runSelectEnabled;
+            if (this.timeline.runSelectEnabled) {
+                if (!(this.timeline.runSelection || []).length) {
+                    if (this.isFl2vMode()) {
+                        this.timeline.runSelection = fl2vStartIndices(this);
+                    } else {
+                        const n = this.getRunnableSegmentCount();
+                        this.timeline.runSelection = Array.from({ length: n }, (_, i) => i);
+                    }
                 } else {
-                    const n = this.getRunnableSegmentCount();
-                    this.timeline.runSelection = Array.from({ length: n }, (_, i) => i);
+                    this.normalizeRunSelection();
                 }
-            } else {
-                this.normalizeRunSelection();
             }
-        }
-        this.updateRunSelectUI();
-        this.commit(this.isImageBatch(), { syncTimeline: true });
-        if (this.isImageBatch()) this.renderImageBatchGroups();
-        else this.scheduleRender();
+        });
     }
 
     setRunSelectionAll(on) {
         if (!this.isRunSelectEnabled()) return;
         if (this.isFl2vMode()) {
-            this.timeline.runSelection = on ? fl2vStartIndices(this) : [];
-            this.updateRunSelectUI();
-            this.commit(false, { syncTimeline: true });
-            this.scheduleRender();
+            this.commitRunSelectionMutation(() => {
+                this.timeline.runSelection = on ? fl2vStartIndices(this) : [];
+            });
             return;
         }
         const n = this.getRunnableSegmentCount();
-        this.timeline.runSelection = on ? Array.from({ length: n }, (_, i) => i) : [];
+        this.commitRunSelectionMutation(() => {
+            this.timeline.runSelection = on ? Array.from({ length: n }, (_, i) => i) : [];
+        });
+    }
+
+    commitRunSelectionMutation(mutation, { refresh = true } = {}) {
+        commitRunSelectionMutationNow(this, mutation);
+        if (!refresh) return;
         this.updateRunSelectUI();
-        this.commit(this.isImageBatch(), { syncTimeline: true });
         if (this.isImageBatch()) this.renderImageBatchGroups();
         else this.scheduleRender();
+    }
+
+    commitSegmentStructureMutation(skipRender = false) {
+        if (this.isRunSelectEnabled()) {
+            this.syncFromWidgets();
+            this.normalizeSegments();
+            this.commitRunSelectionMutation(null, { refresh: false });
+            this.commit(skipRender, { syncTimeline: false });
+            return;
+        }
+        this.commit(skipRender, { syncTimeline: true });
+    }
+
+    ensureRunSelectionSerialized() {
+        ensureRunSelectionSerialized(this);
     }
 
     updateRunSelectUI() {
@@ -4195,7 +4215,7 @@ class MiniMaxH3MotionDirectorEditor {
             cursor = end;
         }
         this.timeline.segments = newSegs;
-        this.commit();
+        this.commitSegmentStructureMutation();
     }
 
     genEqualSplit() {
@@ -4214,14 +4234,14 @@ class MiniMaxH3MotionDirectorEditor {
                 genImage: { imageFile: "" },
             };
         });
-        this.commit();
+        this.commitSegmentStructureMutation();
     }
 
     genDeleteSelectedSegment() {
         if (this.timeline.segments.length <= 1) return;
         this.timeline.segments.splice(this.selectedIndex, 1);
         this.selectedIndex = clamp(this.selectedIndex, 0, this.timeline.segments.length - 1);
-        this.commit();
+        this.commitSegmentStructureMutation();
     }
 
     updateVideoNameLabel() {
@@ -6311,7 +6331,7 @@ class MiniMaxH3MotionDirectorEditor {
         this.updateVideoNameLabel();
         this._prefetchSegmentThumbs(prevTotal, Math.min(prevTotal + totalFrames, prevTotal + THUMB_PREFETCH_BATCH * 4));
         this.updateStageVisibility();
-        this.commit(false, { syncTimeline: true });
+        this.commitSegmentStructureMutation(false);
     }
 
     async probeVideoMetadata(url) {
@@ -7174,7 +7194,7 @@ class MiniMaxH3MotionDirectorEditor {
             this.timeline.segments = newSegs;
             this.selectedIndex = 0;
             this.selectedSplitFrame = null;
-            this.commit();
+            this.commitSegmentStructureMutation();
             this.updateSelectionUI();
             this.updateSplitPointUI();
             const shotCount = data.shotCount ?? Math.max(0, newSegs.length);
@@ -7228,7 +7248,7 @@ class MiniMaxH3MotionDirectorEditor {
                 this.seekBar.max = Math.max(0, this.getTotalFrames() - 1);
                 this.seekBar.value = this.currentFrame;
             }
-            this.commit(false, { syncTimeline: true });
+            this.commitSegmentStructureMutation(false);
             updateFl2vDetailUI(this);
             this.updateVideoNameLabel();
             this.updateDomWidgetHeight();
@@ -9628,7 +9648,9 @@ app.registerExtension({
         const flushDirectors = () => {
             const graph = app.graph ?? app.canvas?.graph;
             for (const node of graph?._nodes ?? graph?.nodes ?? []) {
-                node._minimaxEditor?.flushTimelineSync?.();
+                const editor = node._minimaxEditor;
+                if (!editor) continue;
+                editor.ensureRunSelectionSerialized?.();
             }
         };
         if (app.queuePrompt && !app.queuePrompt._minimaxPatched) {

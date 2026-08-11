@@ -675,7 +675,8 @@ export function removeFl2vShot(editor, index) {
 export function openFl2vUpload(editor) {
     addFl2vShot(editor);
     updateFl2vDetailUI(editor);
-    editor.commit?.(false, { syncTimeline: true });
+    if (editor.commitSegmentStructureMutation) editor.commitSegmentStructureMutation(false);
+    else editor.commit?.(false, { syncTimeline: true });
     editor.updateVideoNameLabel?.();
     editor.scheduleRender?.();
     editor.updateDomWidgetHeight?.();

@@ -655,7 +655,7 @@ export function addImageBatchGroup(editor) {
     }));
     normalizeImageBatchSegments(editor);
     editor.selectedIndex = Math.max(0, editor.timeline.segments.length - 1);
-    commitBatchMutation(editor);
+    commitBatchMutation(editor, { segmentStructureChanged: true });
     editor.updateVideoNameLabel?.();
     editor.updateDomWidgetHeight?.();
 }
@@ -670,7 +670,7 @@ export function deleteImageBatchGroup(editor, index) {
         0,
         editor.timeline.segments.length - 1,
     );
-    commitBatchMutation(editor);
+    commitBatchMutation(editor, { segmentStructureChanged: true });
     editor.updateVideoNameLabel?.();
     editor.updateDomWidgetHeight?.();
 }
@@ -764,9 +764,13 @@ function ensureBatchAssetSchema(editor) {
     }
 }
 
-function commitBatchMutation(editor) {
+function commitBatchMutation(editor, { segmentStructureChanged = false } = {}) {
     ensureBatchAssetSchema(editor);
-    editor.commit(true, { syncTimeline: true });
+    if (segmentStructureChanged && editor.commitSegmentStructureMutation) {
+        editor.commitSegmentStructureMutation(true);
+    } else {
+        editor.commit(true, { syncTimeline: true });
+    }
     editor.renderImageBatchGroups();
 }
 
