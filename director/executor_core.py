@@ -61,6 +61,7 @@ from .segment_runtime import (
     segment_passthrough_chunk,
     tensor_frame_to_jpeg_b64,
 )
+from .color_reanchor import color_reanchor_cache_settings, resolve_color_anchor
 from .plan import (
     DirectorPlan,
     plan_summary,
@@ -281,6 +282,7 @@ def execute_director_plan_core(
     context_length: int = 22,
     source_overlap_frames: int = 5,
     audio_context_enabled: bool = True,
+    color_reanchor_enabled: bool = False,
     clear_vram_between_segments: bool = True,
 ) -> tuple[torch.Tensor, list[torch.Tensor], list[dict[str, Any]], str]:
     """Process every segment with MiniMax H3 conditioning + single-stage sampling."""
@@ -297,6 +299,8 @@ def execute_director_plan_core(
     requested_source_bridge = validate_source_bridge_frames(source_overlap_frames)
     # Keep the old backend/schema field name for workflow compatibility.
     plan.source_overlap_frames = requested_source_bridge
+    plan.color_reanchor_enabled = bool(color_reanchor_enabled)
+    color_reanchor_requested = bool(color_reanchor_enabled)
     audio_context_requested = bool(audio_context_enabled)
     audio_context_active = bool(
         motion_enabled and audio_context_requested and audio_mode == AUDIO_MODE_GENERATE
@@ -325,6 +329,7 @@ def execute_director_plan_core(
         "model_class": type(getattr(model, "model", None)).__name__,
         "model_options": _stable_cache_value(getattr(model, "model_options", {}) or {}),
     }
+    cache_settings.update(color_reanchor_cache_settings(color_reanchor_requested))
     if any(seg.task_key in {"v2v", "rv2v"} for seg in plan.segments):
         cache_settings["reference_video_pipeline"] = H3_REFERENCE_VIDEO_PIPELINE
         cache_settings["source_bridge_pipeline"] = H3_SOURCE_BRIDGE_PIPELINE
@@ -391,6 +396,7 @@ def execute_director_plan_core(
             "for V2V/RV2V."
         )
     reports.append(f"Audio context: {'ON' if audio_context_active else 'OFF'}")
+    reports.append(f"Color Re-anchor: {'ON' if color_reanchor_requested else 'OFF'}")
     reports.append(f"Sampling mode: {sampling_mode} (automatic connection detection)")
     if sampling_mode == "internal":
         reports.append(f"Sampler source: internal {sampler}")
@@ -602,6 +608,7 @@ def execute_director_plan_core(
 
         context_entry: CachedMotionContext | None = None
         context_span = 0
+        color_anchor = None
         if apply_visual_context:
             previous_index = timeline_slot - 1
             context_entry = completed_contexts.get(previous_index)
@@ -636,6 +643,13 @@ def execute_director_plan_core(
                 reports.append(
                     f"Segment {timeline_slot + 1}: requested {requested_context} "
                     f"context frames, using H3-valid exported tail {context_span}."
+                )
+            if color_reanchor_requested:
+                color_anchor = resolve_color_anchor(
+                    plan,
+                    seg,
+                    source_frames=body_raw,
+                    source_bridge_active=source_bridge_active,
                 )
         generation_request = target_len + context_span
         num_frames = minimax_align_frame_count(generation_request)
@@ -750,6 +764,8 @@ def execute_director_plan_core(
                 generation_frame_count=num_frames,
                 audio_enabled=audio_context_active,
                 fps=float(plan.frame_rate or 24.0),
+                color_reanchor_enabled=color_reanchor_requested,
+                color_anchor=color_anchor,
             )
 
         report_director_progress(
@@ -903,8 +919,16 @@ def execute_director_plan_core(
                 f"Segment {ui_idx + 1}: visual Motion Context skipped; "
                 "nominal segment generation retained for Source Bridge anchors."
             )
+            if color_reanchor_requested:
+                reports.append(
+                    f"Segment {ui_idx + 1}: Color Re-anchor skipped (Source Bridge)."
+                )
         elif motion_info is None:
             reports.append(f"Segment {ui_idx + 1}: no previous context")
+            if color_reanchor_requested:
+                reports.append(
+                    f"Segment {ui_idx + 1}: Color Re-anchor skipped (no incoming Motion Context)."
+                )
         else:
             reports.append(
                 f"Segment {ui_idx + 1}: context source = Segment {ui_idx}; "
@@ -912,6 +936,10 @@ def execute_director_plan_core(
                 f"audio context = {motion_info.audio_seconds:.3f}s; "
                 f"removed start anchors = {motion_info.removed_start_anchors}; "
                 f"preserved last anchors = {motion_info.preserved_last_anchors}"
+            )
+            reports.append(
+                f"Segment {ui_idx + 1}: Color Re-anchor: "
+                f"{motion_info.color_reanchor_status}"
             )
         log.info(
             "MiniMax H3 Motion Director segment %d/%d done (%d frames, task=%s)",

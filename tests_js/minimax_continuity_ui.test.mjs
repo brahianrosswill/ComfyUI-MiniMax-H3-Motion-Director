@@ -5,6 +5,7 @@ import {
     SOURCE_BRIDGE_FIXED_FRAMES,
     VIDEO_CONTINUITY_STRATEGIES,
     applyVideoStrategyToWidgets,
+    migrateColorReanchorWidgetValues,
     normalizeSourceBridgeValue,
     notifyWidgetValueChange,
     resolveContinuityUiState,
@@ -23,6 +24,7 @@ const state = (overrides = {}) => resolveContinuityUiState({
     contextFrames: 22,
     sourceBridgeValue: 0,
     audioContextEnabled: true,
+    colorReanchorEnabled: false,
     audioMode: "generate",
     ...overrides,
 });
@@ -46,6 +48,7 @@ test("a single segment shows only the multi-segment availability message", () =>
     assert.equal(actual.showAudioContinuation, false);
     assert.equal(actual.showVisualContinuitySelector, false);
     assert.equal(actual.showBridgeLength, false);
+    assert.equal(actual.showColorReanchor, false);
 });
 
 for (const taskKey of ["t2v", "i2v", "r2v", "fl2v"]) {
@@ -59,6 +62,7 @@ for (const taskKey of ["t2v", "i2v", "r2v", "fl2v"]) {
         assert.equal(actual.showVisualContinuitySelector, false);
         assert.equal(actual.showBridgeLength, false);
         assert.equal(actual.videoStrategy, null);
+        assert.equal(actual.showColorReanchor, ["i2v", "r2v"].includes(taskKey));
     });
 }
 
@@ -73,6 +77,7 @@ for (const taskKey of ["v2v", "rv2v"]) {
         assert.equal(actual.showMotionContext, false);
         assert.equal(actual.showContextFrames, false);
         assert.equal(actual.showAudioContinuation, false);
+        assert.equal(actual.showColorReanchor, false);
     });
 
     test(`${taskKey.toUpperCase()} source 0 plus Motion Context true selects Motion Context`, () => {
@@ -83,6 +88,7 @@ for (const taskKey of ["v2v", "rv2v"]) {
         assert.equal(actual.showMotionContext, false);
         assert.equal(actual.showContextFrames, true);
         assert.equal(actual.showAudioContinuation, true);
+        assert.equal(actual.showColorReanchor, true);
     });
 
     test(`${taskKey.toUpperCase()} source 0 plus Motion Context false selects Off`, () => {
@@ -93,6 +99,7 @@ for (const taskKey of ["v2v", "rv2v"]) {
         assert.equal(actual.showMotionContext, false);
         assert.equal(actual.showContextFrames, false);
         assert.equal(actual.showAudioContinuation, false);
+        assert.equal(actual.showColorReanchor, false);
     });
 }
 
@@ -196,6 +203,62 @@ test("unrelated tasks expose no continuity controls", () => {
     assert.equal(actual.showAudioContinuation, false);
     assert.equal(actual.showVisualContinuitySelector, false);
     assert.equal(actual.showBridgeLength, false);
+    assert.equal(actual.showColorReanchor, false);
+});
+
+test("Color Re-anchor is visible only for supported active Motion Context paths", () => {
+    for (const taskKey of ["i2v", "r2v"]) {
+        const enabled = state({ taskKey, motionContextEnabled: true });
+        assert.equal(enabled.showColorReanchor, true);
+        assert.equal(enabled.colorReanchorControlEnabled, true);
+        const disabled = state({ taskKey, motionContextEnabled: false });
+        assert.equal(disabled.showColorReanchor, true);
+        assert.equal(disabled.colorReanchorControlEnabled, false);
+    }
+    for (const taskKey of ["t2v", "fl2v"]) {
+        assert.equal(state({ taskKey }).showColorReanchor, false);
+    }
+    for (const taskKey of ["v2v", "rv2v"]) {
+        assert.equal(state({
+            taskKey,
+            sourceBridgeValue: 0,
+            motionContextEnabled: true,
+        }).showColorReanchor, true);
+        assert.equal(state({
+            taskKey,
+            sourceBridgeValue: 5,
+            motionContextEnabled: true,
+        }).showColorReanchor, false);
+        assert.equal(state({
+            taskKey,
+            sourceBridgeValue: 0,
+            motionContextEnabled: false,
+        }).showColorReanchor, false);
+    }
+    assert.equal(state({ taskKey: "i2v", segmentCount: 1 }).showColorReanchor, false);
+});
+
+test("legacy workflow values insert Color Re-anchor false without shifting later widgets", () => {
+    const currentWidgets = [
+        { name: "motion_context_enabled" },
+        { name: "context_length" },
+        { name: "source_overlap_frames" },
+        { name: "audio_context_enabled" },
+        { name: "color_reanchor_enabled" },
+        { name: "steps" },
+        { name: "sampler_name" },
+        { name: "scheduler" },
+    ];
+    const legacy = {
+        widgets_values: [true, 22, 5, true, 25, "res_multistep", "simple"],
+    };
+
+    assert.equal(migrateColorReanchorWidgetValues(legacy, currentWidgets), true);
+    assert.deepEqual(
+        legacy.widgets_values,
+        [true, 22, 5, true, false, 25, "res_multistep", "simple"],
+    );
+    assert.equal(migrateColorReanchorWidgetValues(legacy, currentWidgets), false);
 });
 
 test("hidden widgets consume zero height and restore their original size", () => {

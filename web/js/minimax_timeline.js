@@ -91,6 +91,7 @@ import { mountPromptImageMentions } from "./minimax_prompt_mentions.js";
 import {
     VIDEO_CONTINUITY_STRATEGIES,
     applyVideoStrategyToWidgets,
+    migrateColorReanchorWidgetValues,
     normalizeSourceBridgeValue,
     resolveContinuityUiState,
     restoreDisabledWidgetValue,
@@ -299,6 +300,7 @@ const DIRECTOR_WIDGET_LABEL_KEYS = {
     context_length: "widget.contextLength",
     source_overlap_frames: "widget.sourceBridgeEnabled",
     audio_context_enabled: "widget.audioContextEnabled",
+    color_reanchor_enabled: "widget.colorReanchorEnabled",
     steps: "widget.steps",
     sampler_name: "widget.samplerName",
     scheduler: "widget.scheduler",
@@ -315,6 +317,7 @@ const DIRECTOR_WIDGET_TOOLTIP_KEYS = {
     context_length: "widget.tooltip.contextLength",
     source_overlap_frames: "widget.tooltip.sourceBridgeEnabled",
     audio_context_enabled: "widget.tooltip.audioContextEnabled",
+    color_reanchor_enabled: "widget.tooltip.colorReanchorEnabled",
     clear_vram_between_segments: "widget.tooltip.clearVram",
     export_source_images: "widget.tooltip.exportSourceImages",
 };
@@ -623,11 +626,12 @@ function installDirectorContinuityUi(node) {
     const audio = node.widgets?.find((w) => w.name === "audio_context_enabled");
     const motion = node.widgets?.find((w) => w.name === "motion_context_enabled");
     const context = node.widgets?.find((w) => w.name === "context_length");
-    if (!source || !audio || !motion || !context) return;
+    const color = node.widgets?.find((w) => w.name === "color_reanchor_enabled");
+    if (!source || !audio || !motion || !context || !color) return;
     node._mmxContinuityUiInstalled = true;
 
     source.value = normalizeSourceBridgeValue(source.value);
-    for (const widget of [source, audio, motion, context]) {
+    for (const widget of [source, audio, motion, context, color]) {
         setWidgetVisibility(widget, true);
         captureContinuityRenderer(widget);
     }
@@ -635,6 +639,7 @@ function installDirectorContinuityUi(node) {
     installContinuityCallbackGuard(node, motion);
     installContinuityCallbackGuard(node, context);
     installContinuityCallbackGuard(node, audio);
+    installContinuityCallbackGuard(node, color);
     node.setDirtyCanvas?.(true, true);
 }
 
@@ -646,6 +651,7 @@ function refreshDirectorContinuityUi(node, editor = node?._minimaxEditor) {
     const audio = node.widgets?.find((w) => w.name === "audio_context_enabled");
     const motion = node.widgets?.find((w) => w.name === "motion_context_enabled");
     const context = node.widgets?.find((w) => w.name === "context_length");
+    const color = node.widgets?.find((w) => w.name === "color_reanchor_enabled");
     const taskKey = editor?.getTaskKey?.() || resolveTaskKey(
         node.widgets?.find((w) => w.name === "task_type")?.value,
     );
@@ -659,6 +665,7 @@ function refreshDirectorContinuityUi(node, editor = node?._minimaxEditor) {
         contextFrames: context?.value,
         sourceBridgeValue: source?.value,
         audioContextEnabled: audio?.value,
+        colorReanchorEnabled: color?.value,
         audioMode: editor?.timeline?.output?.audioMode || "generate",
     });
     source.value = state.sourceBridgeValue;
@@ -666,6 +673,7 @@ function refreshDirectorContinuityUi(node, editor = node?._minimaxEditor) {
 
     restoreContinuityRenderer(motion);
     restoreContinuityRenderer(audio);
+    restoreContinuityRenderer(color);
     setWidgetVisibility(source, false);
     setWidgetVisibility(
         motion,
@@ -676,6 +684,7 @@ function refreshDirectorContinuityUi(node, editor = node?._minimaxEditor) {
         audio,
         state.showAudioContinuation || state.showBridgeLength,
     );
+    setWidgetVisibility(color, state.showColorReanchor);
 
     setContinuityWidgetEnabled(
         motion,
@@ -683,12 +692,14 @@ function refreshDirectorContinuityUi(node, editor = node?._minimaxEditor) {
     );
     setContinuityWidgetEnabled(context, state.contextFramesControlEnabled);
     setContinuityWidgetEnabled(audio, state.audioContextControlEnabled);
+    setContinuityWidgetEnabled(color, state.colorReanchorControlEnabled);
     source._mmxContinuityDisabled = true;
 
     audio.options = audio.options || {};
     motion.options = motion.options || {};
     context.options = context.options || {};
     source.options = source.options || {};
+    color.options = color.options || {};
 
     if (state.showVisualContinuitySelector) {
         motion.type = "custom";
@@ -726,6 +737,8 @@ function refreshDirectorContinuityUi(node, editor = node?._minimaxEditor) {
     context.label = t("widget.contextLength");
     setWidgetTooltip(context, t("widget.tooltip.contextLength"), node);
     setWidgetTooltip(source, t("widget.tooltip.sourceBridgeEnabled"), node);
+    color.label = t("widget.colorReanchorEnabled");
+    setWidgetTooltip(color, t("widget.tooltip.colorReanchorEnabled"), node);
 
     if (state.showBridgeLength) {
         audio.type = "custom";
@@ -770,6 +783,7 @@ function refreshDirectorContinuityUi(node, editor = node?._minimaxEditor) {
         state.showAudioContinuation,
         state.showVisualContinuitySelector,
         state.showBridgeLength,
+        state.showColorReanchor,
     ].join("|");
     if (node._mmxContinuityLayoutSignature !== layoutSignature) {
         node._mmxContinuityLayoutSignature = layoutSignature;
@@ -9737,6 +9751,7 @@ app.registerExtension({
         const onConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function () {
             migrateLegacySamplingControlNode(arguments[0]);
+            migrateColorReanchorWidgetValues(arguments[0], this.widgets || []);
             normalizeDirectorOutputs(this);
             const out = onConfigure?.apply(this, arguments);
             setTimeout(() => {

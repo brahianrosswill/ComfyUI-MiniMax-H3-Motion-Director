@@ -14,6 +14,7 @@ from typing import Any
 import torch
 
 from ..patches import MC_AUDIO_KEY, MC_KEY, motion_context_patch_status
+from .color_reanchor import apply_color_reanchor
 
 log = logging.getLogger("ComfyUI-MiniMax-H3-Motion-Director.motion_context")
 
@@ -31,6 +32,7 @@ class MotionContextInfo:
     audio_seconds: float
     removed_start_anchors: int
     preserved_last_anchors: int
+    color_reanchor_status: str = "OFF"
 
 
 def pixel_frames_for_latent_steps(latent_t: int) -> int:
@@ -102,13 +104,23 @@ def _encode_video_context(
     width: int,
     height: int,
     span: int,
-) -> tuple[list[dict[str, Any]], int]:
+    color_reanchor_enabled: bool = False,
+    color_anchor: torch.Tensor | None = None,
+) -> tuple[list[dict[str, Any]], int, str]:
     if int(frames.shape[0]) < span:
         raise ValueError(
             "Motion Director: previous segment has %d frames; %d context frames are required."
             % (int(frames.shape[0]), span)
         )
     tail = _resize_frames(frames[-span:], width, height)
+    color_status = "OFF"
+    if color_reanchor_enabled:
+        if color_anchor is None or not isinstance(color_anchor, torch.Tensor) or int(color_anchor.numel()) == 0:
+            color_status = "skipped (no anchor)"
+        else:
+            anchor = _resize_frames(color_anchor[:1], width, height)
+            tail = apply_color_reanchor(tail, anchor)
+            color_status = "ON"
     try:
         encoded = vae.encode(tail)
     except torch.cuda.OutOfMemoryError as exc:
@@ -139,7 +151,7 @@ def _encode_video_context(
                 "latent": encoded[:, :, step : step + 1],
             }
         )
-    return keyframes, latent_t
+    return keyframes, latent_t, color_status
 
 
 def _encode_audio_context(
@@ -287,6 +299,8 @@ def apply_exported_motion_context(
     generation_frame_count: int,
     audio_enabled: bool,
     fps: float,
+    color_reanchor_enabled: bool = False,
+    color_anchor: torch.Tensor | None = None,
 ) -> tuple[list, MotionContextInfo]:
     ready, reason = motion_context_patch_status()
     if not ready:
@@ -316,12 +330,14 @@ def apply_exported_motion_context(
             "Motion Director: requested output end is outside the aligned H3 timeline."
         )
 
-    motion_keyframes, block_count = _encode_video_context(
+    motion_keyframes, block_count, color_status = _encode_video_context(
         video_vae,
         context_frames,
         width=width,
         height=height,
         span=int(context_span),
+        color_reanchor_enabled=bool(color_reanchor_enabled),
+        color_anchor=color_anchor,
     )
     motion_audio_ref = None
     audio_steps = 0
@@ -346,6 +362,7 @@ def apply_exported_motion_context(
         audio_seconds=audio_steps / AUDIO_LATENT_HZ if audio_steps else 0.0,
         removed_start_anchors=removed,
         preserved_last_anchors=preserved,
+        color_reanchor_status=color_status,
     )
     return merged, info
 

@@ -25,6 +25,7 @@ import torch
 import folder_paths
 
 from .frame_align import H3_REFERENCE_VIDEO_PIPELINE, H3_SOURCE_BRIDGE_PIPELINE
+from .color_reanchor import COLOR_REANCHOR_PIPELINE
 from .plan import DirectorPlan, SegmentPlan
 
 log = logging.getLogger("ComfyUI-MiniMax-H3-Motion-Director.director.cache")
@@ -76,6 +77,8 @@ def segment_cache_fingerprint(seg: SegmentPlan, plan: DirectorPlan) -> dict[str,
         "continuity_overlap": plan.continuity_overlap_frames if plan.continuity_enabled else 0,
         # Bump when continuity sampling/handoff semantics change (invalidates stale segs).
         "continuity_pipeline": "minimax_h3_lastframe_v1",
+        "color_reanchor_enabled": bool(getattr(plan, "color_reanchor_enabled", False)),
+        "color_reanchor_pipeline": COLOR_REANCHOR_PIPELINE,
     }
     if seg.task_key in {"v2v", "rv2v"}:
         fingerprint["reference_video_pipeline"] = H3_REFERENCE_VIDEO_PIPELINE

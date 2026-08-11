@@ -137,6 +137,8 @@ class DirectorPlan:
     # Runtime executor setting. Stored on the plan so segment/context cache
     # fingerprints cannot reuse outputs from a different Source Bridge policy.
     source_overlap_frames: int = 0
+    # Runtime-only setting appended to the node schema for old workflow safety.
+    color_reanchor_enabled: bool = False
     global_ref_audios: list[SegmentRefAudio] = field(default_factory=list)
 
     @property

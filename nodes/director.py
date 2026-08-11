@@ -149,6 +149,16 @@ class MiniMaxH3MotionDirector:
                         ),
                     },
                 ),
+                "color_reanchor_enabled": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": (
+                            "Re-anchor incoming Motion Context color statistics to a "
+                            "stable reference to reduce cumulative color drift."
+                        ),
+                    },
+                ),
                 "bd_grp_advanced": ("BDGROUP", {"default": "高级采样"}),
                 "steps": (
                     "INT",
@@ -255,6 +265,7 @@ class MiniMaxH3MotionDirector:
         context_length=22,
         source_overlap_frames=5,
         audio_context_enabled=True,
+        color_reanchor_enabled=False,
         steps=25,
         sampler_name="res_multistep",
         scheduler="simple",
@@ -305,6 +316,7 @@ class MiniMaxH3MotionDirector:
             context_length=context_length,
             source_overlap_frames=source_overlap_frames,
             audio_context_enabled=audio_context_enabled,
+            color_reanchor_enabled=color_reanchor_enabled,
             clear_vram_between_segments=clear_vram_between_segments,
         )
 

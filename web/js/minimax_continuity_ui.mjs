@@ -138,12 +138,30 @@ export function applyVideoStrategyToWidgets({
     return changed;
 }
 
+export function migrateColorReanchorWidgetValues(serializedNode, currentWidgets = []) {
+    const values = serializedNode?.widgets_values;
+    if (!Array.isArray(values) || !Array.isArray(currentWidgets)) return false;
+    const serializable = currentWidgets.filter((widget) => (
+        widget?.serialize !== false && widget?.options?.serialize !== false
+    ));
+    const colorIndex = serializable.findIndex(
+        (widget) => widget?.name === "color_reanchor_enabled",
+    );
+    if (colorIndex < 0 || colorIndex >= values.length) return false;
+    // BOOLEAN widgets serialize as true/false. In legacy workflows the value
+    // at this new slot belongs to the following group/steps widget instead.
+    if (typeof values[colorIndex] === "boolean") return false;
+    values.splice(colorIndex, 0, false);
+    return true;
+}
+
 export function resolveContinuityUiState({
     taskKey,
     segmentCount,
     motionContextEnabled,
     sourceBridgeValue,
     audioMode,
+    colorReanchorEnabled,
 } = {}) {
     const task = String(taskKey || "").trim().toLowerCase();
     const segments = Math.max(0, Math.trunc(Number(segmentCount) || 0));
@@ -170,6 +188,8 @@ export function resolveContinuityUiState({
     const videoMotionUi = mode === "video_strategy"
         && videoStrategy === VIDEO_CONTINUITY_STRATEGIES.MOTION_CONTEXT;
     const motionActive = (generatedMotionUi && motionOn) || videoMotionUi;
+    const colorTask = task === "i2v" || task === "r2v";
+    const showColorReanchor = (generatedMotionUi && colorTask) || videoMotionUi;
     const showContextFrames = generatedMotionUi || videoMotionUi;
     const showAudioContinuation = generatedMotionUi || videoMotionUi;
     const generatedAudioContinuationActive = generatedMotionUi && motionActive;
@@ -191,9 +211,12 @@ export function resolveContinuityUiState({
         showVisualContinuitySelector: mode === "video_strategy",
         showBridgeLength: mode === "video_strategy"
             && videoStrategy === VIDEO_CONTINUITY_STRATEGIES.SOURCE_BRIDGE,
+        showColorReanchor,
         motionContextControlEnabled: generatedMotionUi,
         contextFramesControlEnabled: motionActive,
         audioContextControlEnabled: generatedAudioContinuationActive
             || videoEditAudioContinuationActive,
+        colorReanchorControlEnabled: showColorReanchor && motionActive,
+        colorReanchorEnabled: boolValue(colorReanchorEnabled),
     };
 }
