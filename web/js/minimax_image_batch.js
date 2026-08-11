@@ -1903,7 +1903,27 @@ export function renderImageBatchGroups(editor) {
                 refs: seg.refs || [],
                 audios: seg.refAudios || [],
                 videos: seg.refVideos || [],
-            }));
+            }), {
+                overlayLayer: editor._directorOverlayLayer,
+                onEnableAsset: (item) => {
+                    if (item?.source !== "common") return null;
+                    const common = editor.timeline.r2vCommon || {};
+                    const commonIds = allKnownReferenceAssets(common).map((asset) => asset.assetId);
+                    if (!setCommonAssetEnabled(seg, commonIds, item.assetId, true)) return null;
+                    // Preserve the live mention range: serialize the changed selection
+                    // without rebuilding/destroying this prompt controller yet.
+                    editor.commit(true, { syncTimeline: true });
+                    return referenceAssetStates(common, seg).find((asset) => (
+                        asset.kind === item.kind && asset.assetId === item.assetId
+                    ));
+                },
+                onMentionInserted: (_item, { wasDisabled }) => {
+                    if (!wasDisabled) return;
+                    setTimeout(() => {
+                        if (!editor._destroyed) editor.renderImageBatchGroups?.();
+                    }, 0);
+                },
+            });
             if (controller) editor._batchPromptMentionControllers.push(controller);
         }
 

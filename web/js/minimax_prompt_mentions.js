@@ -22,7 +22,10 @@ import {
 } from "./minimax_reference_assets.mjs";
 import { t } from "./minimax_i18n.js";
 import {
+    activateMentionItem,
+    computeMentionMenuPosition,
     createListenerRegistry,
+    filterMentionPickerItems,
     isPromptEditingKey,
     moveMentionActiveIndex,
     promptValueNeedsRender,
@@ -43,9 +46,11 @@ const MENTION_STYLES = `
 .bd-prompt-chip[data-state="disabled"]{border-color:#9a622e;background:#302318;color:#ffb66e}
 .bd-prompt-chip[data-state="missing"]{border-color:#8b4b4b;background:#301b1b;color:#ff9c9c}
 .bd-prompt-chip-picture:before{content:"▣";margin-right:4px}.bd-prompt-chip-video:before{content:"▶";margin-right:4px}.bd-prompt-chip-audio:before{content:"♪";margin-right:4px}
-.bd-mention-menu{position:fixed;z-index:10050;min-width:230px;max-width:340px;max-height:240px;overflow:auto;background:#252525;border:1px solid #444;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.45);padding:4px 0}
+.bd-mention-menu{position:fixed;z-index:160;min-width:0;overflow:auto;background:#252525;border:1px solid #444;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.45);padding:4px 0}
 .bd-mention-menu.hidden{display:none!important}.bd-mention-title{padding:6px 10px 4px;font-size:10px;color:#888;user-select:none}
+.bd-mention-kind-title{padding:6px 10px 3px;border-top:1px solid #343434;font-size:9px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#777;user-select:none}
 .bd-mention-item{display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:11px;color:#ddd}.bd-mention-item:hover,.bd-mention-item.active{background:#333;color:#fff}
+.bd-mention-item[data-state="disabled"] .bd-mention-label{color:#ffb66e}
 .bd-mention-item img{width:36px;height:36px;object-fit:cover;border-radius:4px;flex-shrink:0;background:#111;border:1px solid #333}.bd-mention-item .bd-mention-label{font-weight:650;color:#4fff8f}.bd-mention-item .bd-mention-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aaa}
 .bd-mention-empty{padding:10px 12px;font-size:11px;color:#888;text-align:center;line-height:1.4}
 `;
@@ -100,6 +105,7 @@ export function mentionItemsFromMedia(media = {}) {
         return media.assets.map((asset) => ({
             kind: asset.kind,
             assetId: asset.assetId,
+            source: asset.source || "",
             label: asset.effectiveTag || asset.authoringTag,
             authoringTag: asset.authoringTag || "",
             effectiveTag: asset.effectiveTag || asset.officialTag || "",
@@ -115,9 +121,16 @@ export function mentionItemsFromMedia(media = {}) {
 
 function positionMenu(menu, editorEl) {
     const rect = editorEl.getBoundingClientRect();
-    menu.style.left = `${Math.max(8, rect.left)}px`;
-    menu.style.top = `${Math.min(window.innerHeight - 16, rect.bottom + 4)}px`;
-    menu.style.maxWidth = `${Math.max(230, rect.width)}px`;
+    const menuRect = menu.getBoundingClientRect();
+    const position = computeMentionMenuPosition(rect, menuRect, {
+        width: window.innerWidth,
+        height: window.innerHeight,
+    });
+    menu.style.left = String(position.left) + "px";
+    menu.style.top = String(position.top) + "px";
+    menu.style.width = String(position.width) + "px";
+    menu.style.maxWidth = String(position.width) + "px";
+    menu.style.maxHeight = String(position.height) + "px";
 }
 
 function semanticRegex() {
@@ -171,7 +184,7 @@ function previousChipAtCaret(root) {
 }
 
 /** Replace a textarea with a contenteditable semantic-chip editor. */
-export function wirePromptImageMentions(editor, textarea, getMedia) {
+export function wirePromptImageMentions(editor, textarea, getMedia, options = {}) {
     if (!textarea) return null;
     if (textarea._mmxMentionController) return textarea._mmxMentionController;
     textarea.dataset.mentionWired = "1";
@@ -194,9 +207,9 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
     let destroyed = false;
     let composing = false;
     const listeners = createListenerRegistry();
-    const mediaItems = ({ activeOnly = false } = {}) => mentionItemsFromMedia(
+    const mediaItems = () => mentionItemsFromMedia(
         typeof getMedia === "function" ? (getMedia() || {}) : {},
-    ).filter((item) => !activeOnly || item.status === "active");
+    ).filter((item) => item.status !== "missing");
     const mapping = () => new Map(mediaItems().map((item) => [item.token, item]));
 
     const makeChip = (token, item = null) => {
@@ -267,7 +280,8 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
         menu.className = "bd-mention-menu hidden";
         menu.setAttribute("role", "listbox");
         menu.addEventListener("mousedown", (event) => event.preventDefault());
-        document.body.appendChild(menu);
+        const portal = options.overlayLayer || editor?._directorOverlayLayer || document.body;
+        portal.appendChild(menu);
         return menu;
     };
 
@@ -284,10 +298,29 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
         rows[activeIndex]?.scrollIntoView?.({ block: "nearest" });
     };
 
-    const insertMention = (item) => {
+    let insertingMention = false;
+    const insertMention = async (item) => {
         if (!mentionRange) return;
+        if (insertingMention) return;
+        insertingMention = true;
+        const wasDisabled = item.status === "disabled";
+        let resolved = item;
+        try {
+            resolved = await activateMentionItem(item, {
+                enableItem: options.onEnableAsset,
+                getItems: mediaItems,
+            });
+        } catch (error) {
+            console.error("[MiniMax H3 Motion Director] reference mention activation failed:", error);
+            insertingMention = false;
+            return;
+        }
+        if (destroyed || !mentionRange) {
+            insertingMention = false;
+            return;
+        }
         mentionRange.deleteContents();
-        const chip = makeChip(item.token, item);
+        const chip = makeChip(resolved.token, resolved);
         const space = document.createTextNode(" ");
         mentionRange.insertNode(space);
         mentionRange.insertNode(chip);
@@ -300,13 +333,14 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
         closeMenu();
         syncTextarea();
         rich.focus();
+        insertingMention = false;
+        options.onMentionInserted?.(resolved, { wasDisabled });
     };
 
     const renderMenu = (query) => {
         const m = ensureMenu();
-        const all = mediaItems({ activeOnly: true });
-        const q = String(query || "").toLowerCase();
-        filtered = all.filter((item) => !q || `${item.label} ${item.name}`.toLowerCase().includes(q));
+        const all = mediaItems();
+        filtered = filterMentionPickerItems(all, query);
         activeIndex = Math.min(activeIndex, Math.max(0, filtered.length - 1));
         m.replaceChildren();
         const title = document.createElement("div");
@@ -319,9 +353,18 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
             empty.textContent = all.length ? t("mention.emptyFilter") : t("mention.emptyNoUpload");
             m.appendChild(empty);
         }
+        let lastKind = "";
         filtered.forEach((item, index) => {
+            if (item.kind !== lastKind) {
+                lastKind = item.kind;
+                const kindTitle = document.createElement("div");
+                kindTitle.className = "bd-mention-kind-title";
+                kindTitle.textContent = t("batch.r2v.assetKind." + item.kind);
+                m.appendChild(kindTitle);
+            }
             const row = document.createElement("div");
             row.className = `bd-mention-item${index === activeIndex ? " active" : ""}`;
+            row.dataset.state = item.status || "active";
             if (item.thumb) {
                 const img = document.createElement("img");
                 img.src = item.thumb;
@@ -330,7 +373,9 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
             }
             const tag = document.createElement("span");
             tag.className = "bd-mention-label";
-            tag.textContent = item.label;
+            tag.textContent = item.status === "disabled"
+                ? t("mention.disabledPicker")
+                : item.label;
             row.appendChild(tag);
             if (item.name) {
                 const name = document.createElement("span");
@@ -340,12 +385,14 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
             }
             row.onmousedown = (event) => {
                 event.preventDefault();
-                insertMention(item);
+                void insertMention(item);
             };
             m.appendChild(row);
         });
-        positionMenu(m, rich);
         m.classList.remove("hidden");
+        m.style.visibility = "hidden";
+        positionMenu(m, rich);
+        m.style.visibility = "";
     };
 
     const openIfMention = () => {
@@ -394,7 +441,7 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
             updateActiveRow();
         } else if (event.key === "Enter" || event.key === "Tab") {
             event.preventDefault();
-            insertMention(filtered[activeIndex]);
+            void insertMention(filtered[activeIndex]);
         } else if (event.key === "Escape") {
             event.preventDefault();
             closeMenu();
@@ -422,6 +469,9 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
     const controller = {
         rich,
         textarea,
+        get isMenuOpen() {
+            return !!menu && !menu.classList.contains("hidden");
+        },
         getValue() {
             if (!destroyed) textarea.value = serializeRich(rich);
             return String(textarea.value || "");

@@ -293,7 +293,7 @@ test("semantic C identity keeps authoring tag while effective chip tag follows s
 });
 
 
-test("disabled Common assets are excluded from picker data and prompt preflight fails", () => {
+test("disabled Common assets stay excluded from effective compilation and prompt preflight fails", () => {
     const timeline = fixture();
     const assets = effectiveReferenceAssets(timeline.r2vCommon, {
         ...timeline.segments[0], excludedCommonAssetIds: ["B", "C", "V", "AU"], refs: [], refVideos: [], refAudios: [],

@@ -18,7 +18,7 @@ function ensureStyles() {
 .mmx-director-launcher-lang{flex:0 0 58px;padding:0 7px;text-align:center}
 .mmx-director-page-overlay{position:fixed;inset:0;z-index:100000;display:flex;align-items:center;justify-content:center;padding:12px;box-sizing:border-box;background:rgba(0,0,0,.72)}
 .mmx-director-page-overlay[hidden]{display:none!important}
-.mmx-director-page-shell{position:relative;width:92vw;height:90vh;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);min-width:0;min-height:0;display:flex;flex-direction:column;overflow:hidden;border:1px solid #3a3a3a;border-radius:9px;background:#141414;box-shadow:0 20px 70px rgba(0,0,0,.72);color:#e0e0e0;font-family:ui-sans-serif,system-ui,-apple-system,sans-serif}
+.mmx-director-page-shell{position:relative;width:92vw;height:90vh;max-width:calc(100vw - 24px);max-height:calc(100vh - 24px);min-width:0;min-height:0;display:flex;flex-direction:column;overflow:visible;border:1px solid #3a3a3a;border-radius:9px;background:#141414;box-shadow:0 20px 70px rgba(0,0,0,.72);color:#e0e0e0;font-family:ui-sans-serif,system-ui,-apple-system,sans-serif}
 .mmx-director-page-header{flex:0 0 44px;min-height:44px;display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 8px 0 14px;border-bottom:1px solid #303030;background:#191919;box-sizing:border-box}
 .mmx-director-page-title{min-width:0;margin:0;color:#eee;font-size:13px;font-weight:650;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .mmx-director-page-close{flex:0 0 32px;width:32px;height:32px;padding:0;border:1px solid transparent;border-radius:6px;background:transparent;color:#aaa;font-size:22px;line-height:28px;cursor:pointer}

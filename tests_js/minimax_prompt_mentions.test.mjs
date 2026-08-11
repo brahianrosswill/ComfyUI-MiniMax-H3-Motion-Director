@@ -2,8 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+    activateMentionItem,
+    computeMentionMenuPosition,
     createTimelineShortcutHandler,
     createListenerRegistry,
+    filterMentionPickerItems,
     isEditableTarget,
     isPromptEditingKey,
     mentionQueryFromText,
@@ -18,6 +21,73 @@ import {
 test("typing @ opens a query at the current prompt caret", () => {
     assert.deepEqual(mentionQueryFromText("scene @Pic", 10), { start: 6, query: "Pic" });
     assert.equal(mentionQueryFromText("scene without mention"), null);
+});
+
+test("disabled Common picker item is enabled, remapped and keeps its semantic identity", async () => {
+    const token = "{{mmx-ref:picture:B}}";
+    const disabled = {
+        kind: "picture",
+        assetId: "B",
+        token,
+        status: "disabled",
+        effectiveTag: "",
+    };
+    let enabled = false;
+    const selected = await activateMentionItem(disabled, {
+        enableItem: (item) => {
+            assert.equal(item.assetId, "B");
+            enabled = true;
+        },
+        getItems: () => [{
+            ...disabled,
+            status: enabled ? "active" : "disabled",
+            effectiveTag: enabled ? "<Picture 1>" : "",
+        }],
+    });
+    assert.equal(enabled, true);
+    assert.equal(selected.status, "active");
+    assert.equal(selected.effectiveTag, "<Picture 1>");
+    assert.equal(selected.token, token);
+    assert.equal(selected.assetId, "B");
+});
+
+test("@ picker includes disabled Common and active Local, but excludes missing assets", () => {
+    const items = [
+        { kind: "picture", assetId: "A", status: "disabled", authoringTag: "<Picture 1>", name: "A.png" },
+        { kind: "picture", assetId: "B", status: "disabled", authoringTag: "<Picture 2>", name: "B.png" },
+        { kind: "picture", assetId: "C", status: "disabled", authoringTag: "<Picture 3>", name: "C.png" },
+        { kind: "picture", assetId: "D", status: "active", effectiveTag: "<Picture 1>", name: "D.png" },
+        { kind: "video", assetId: "V", status: "missing", name: "gone.mp4" },
+    ];
+    assert.deepEqual(
+        filterMentionPickerItems(items, "").map((item) => item.assetId),
+        ["A", "B", "C", "D"],
+    );
+    assert.deepEqual(
+        filterMentionPickerItems(items, "picture").map((item) => item.assetId),
+        ["A", "B", "C", "D"],
+    );
+});
+
+test("mention menu stays within top, bottom, left and right viewport edges", () => {
+    assert.equal(typeof computeMentionMenuPosition, "function");
+    const viewport = { width: 800, height: 600 };
+    const menu = { width: 340, height: 240 };
+    const anchors = [
+        { left: -30, right: 100, top: 4, bottom: 30, width: 130, height: 26 },
+        { left: 700, right: 900, top: 560, bottom: 590, width: 200, height: 30 },
+        { left: 740, right: 790, top: 200, bottom: 230, width: 50, height: 30 },
+        { left: 10, right: 210, top: 570, bottom: 598, width: 200, height: 28 },
+    ];
+    for (const anchor of anchors) {
+        const position = computeMentionMenuPosition(anchor, menu, viewport);
+        assert.ok(position.left >= 8, JSON.stringify(position));
+        assert.ok(position.top >= 8, JSON.stringify(position));
+        assert.ok(position.left + position.width <= viewport.width - 8, JSON.stringify(position));
+        assert.ok(position.top + position.height <= viewport.height - 8, JSON.stringify(position));
+    }
+    const bottom = computeMentionMenuPosition(anchors[3], menu, viewport);
+    assert.equal(bottom.opensAbove, true);
 });
 
 test("capture handler receives real key events without firing editor shortcuts", () => {

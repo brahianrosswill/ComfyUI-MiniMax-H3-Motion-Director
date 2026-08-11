@@ -1782,7 +1782,12 @@ class MiniMaxH3MotionDirectorEditor {
             launcherHost: this.launcherContainer,
             translate: t,
             toggleLanguage: toggleLocale,
-            hasInternalDialog: () => !!this._modalEl || !!this._r2vCommonPopover?.isOpen,
+            hasInternalDialog: () => (
+                !!this._modalEl
+                || !!this._r2vCommonPopover?.isOpen
+                || [...(this._promptMentionControllers || []), ...(this._batchPromptMentionControllers || [])]
+                    .some((controller) => controller?.isMenuOpen)
+            ),
             onOpen: () => {
                 this._directorModalOpen = true;
                 this._resetLayoutStyles();

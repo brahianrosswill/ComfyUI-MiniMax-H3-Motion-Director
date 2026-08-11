@@ -5,6 +5,85 @@ export function moveMentionActiveIndex(current, delta, length) {
     return (Number(current || 0) + Number(delta || 0) + length) % length;
 }
 
+export async function activateMentionItem(item, {
+    enableItem,
+    getItems,
+} = {}) {
+    if (!item || item.status === "missing") {
+        throw new Error("Reference asset is unavailable.");
+    }
+    if (item.status !== "disabled") return item;
+    if (typeof enableItem !== "function") {
+        throw new Error("Disabled Common reference cannot be enabled.");
+    }
+    const returned = await enableItem(item);
+    const candidates = typeof getItems === "function" ? (getItems() || []) : [];
+    const resolved = returned?.status === "active"
+        ? returned
+        : candidates.find((candidate) => (
+            candidate?.kind === item.kind
+            && String(candidate?.assetId || "") === String(item.assetId || "")
+        ));
+    if (!resolved || resolved.status !== "active" || !resolved.effectiveTag) {
+        throw new Error("Disabled Common reference could not be enabled.");
+    }
+    return {
+        ...resolved,
+        kind: item.kind,
+        assetId: item.assetId,
+        token: item.token,
+    };
+}
+
+export function computeMentionMenuPosition(anchorRect = {}, menuRect = {}, viewport = {}) {
+    const margin = 8;
+    const gap = 4;
+    const viewportWidth = Math.max(1, Number(viewport.width) || 1);
+    const viewportHeight = Math.max(1, Number(viewport.height) || 1);
+    const availableWidth = Math.max(1, viewportWidth - margin * 2);
+    const availableHeight = Math.max(1, viewportHeight - margin * 2);
+    const desiredWidth = Math.max(
+        230,
+        Number(anchorRect.width) || 0,
+        Number(menuRect.width) || 0,
+    );
+    const width = Math.min(340, desiredWidth, availableWidth);
+    const height = Math.min(240, Math.max(1, Number(menuRect.height) || 240), availableHeight);
+    const anchorTop = Number(anchorRect.top) || 0;
+    const anchorBottom = Number(anchorRect.bottom) || anchorTop;
+    const spaceBelow = viewportHeight - anchorBottom - gap - margin;
+    const spaceAbove = anchorTop - gap - margin;
+    const opensAbove = spaceBelow < height && spaceAbove > spaceBelow;
+    const preferredTop = opensAbove
+        ? anchorTop - gap - height
+        : anchorBottom + gap;
+    const top = Math.min(
+        Math.max(margin, preferredTop),
+        Math.max(margin, viewportHeight - height - margin),
+    );
+    const left = Math.min(
+        Math.max(margin, Number(anchorRect.left) || margin),
+        Math.max(margin, viewportWidth - width - margin),
+    );
+    return { left, top, width, height, opensAbove };
+}
+
+export function filterMentionPickerItems(items, query = "") {
+    const normalizedQuery = String(query || "").trim().toLowerCase();
+    return (items || []).filter((item) => {
+        if (!item || !["active", "disabled"].includes(item.status || "active")) return false;
+        if (!normalizedQuery) return true;
+        const searchable = [
+            item.kind,
+            item.label,
+            item.name,
+            item.authoringTag,
+            item.effectiveTag,
+        ].join(" ").toLowerCase();
+        return searchable.includes(normalizedQuery);
+    });
+}
+
 export function shouldCloseMentionForScroll(menu, eventTarget) {
     return !(menu && eventTarget && (eventTarget === menu || menu.contains?.(eventTarget)));
 }
