@@ -38,9 +38,13 @@ import {
 import { wirePromptImageMentions } from "./minimax_prompt_mentions.js";
 import {
     allKnownReferenceAssets,
-    commonAssetIds,
     effectiveReferenceAssets,
+    ensureR2vReferenceAssetSchema,
     ensureReferenceAssetSchema,
+    moveReferenceAssetSlot,
+    referenceAssetStates,
+    replaceReferenceAssetAtSlot,
+    setCommonAssetEnabled,
 } from "./minimax_reference_assets.mjs";
 import { t } from "./minimax_i18n.js";
 
@@ -242,6 +246,8 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-run-all input{width:14px;height:14px;margin:0;cursor:pointer;accent-color:#4fff8f}
 /* max-height must stay in sync with BATCH_LIST_MAX_H in getImageBatchUiHeight(). */
 .bd-batch-list{display:flex;flex-direction:column;gap:8px;width:100%;max-height:640px;overflow-y:auto;padding-right:2px}
+.bd-r2v-common-toggle.hidden,.bd-r2v-common-panel.hidden{display:none!important}
+.bd-r2v-common-panel{margin:0 0 8px;padding:12px 14px;border:1px solid #46644f;border-radius:10px;background:linear-gradient(165deg,#172019 0%,#131713 58%,#101210 100%)}
 .bd-batch-card{background:linear-gradient(165deg,#1a1a1a 0%,#141414 55%,#111 100%);border:1px solid #2c2c2c;border-radius:10px;padding:12px 14px;display:grid;gap:10px;align-items:stretch;box-shadow:inset 0 1px 0 rgba(255,255,255,.03)}
 /* t2v: 提示词为主，预览收成右侧窄栏 */
 .bd-batch-card.bd-batch-plain{grid-template-columns:minmax(0,1fr) minmax(132px,168px)}
@@ -260,7 +266,7 @@ export const IMAGE_BATCH_STYLES = `
 .bd-r2v-common-select-head{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#aaa;font-size:11px;font-weight:650}
 .bd-r2v-common-actions{display:flex;gap:6px}.bd-r2v-common-actions button{font-size:10px;padding:2px 7px}
 .bd-r2v-common-items{display:flex;flex-wrap:wrap;gap:6px 10px}.bd-r2v-common-item{display:flex;align-items:center;gap:5px;color:#ccc;font-size:10px;max-width:190px}.bd-r2v-common-item span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.bd-r2v-use-common-prompt{display:flex;align-items:center;gap:6px;color:#ccc;font-size:11px}
+.bd-r2v-use-common-assets{display:flex;align-items:center;gap:6px;color:#ccc;font-size:11px}
 .bd-r2v-local-title{color:#8f9a92;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;margin-bottom:-4px}
 .bd-r2v-paired-audio{border:1px solid #4d5d51;background:#182019;color:#9fe0ad;border-radius:5px;padding:1px 5px;font-size:10px;cursor:pointer}
 .bd-batch-card.running{border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.25)}
@@ -458,6 +464,7 @@ export function mountImageBatchPanel(root) {
         <div class="bd-batch-toolbar">
             <button type="button" class="bd-btn bd-btn-primary" data-a="batch-add" data-i18n="batch.addPromptGroup">+ 添加提示词组</button>
             <button type="button" class="bd-btn bd-batch-run-select hidden" data-a="batch-run-select" data-i18n="toolbar.runSelect" data-i18n-title="tooltip.batchRunSelect">选择运行</button>
+            <button type="button" class="bd-btn bd-r2v-common-toggle hidden" data-a="r2v-common-toggle" data-i18n="batch.r2v.commonReferences" data-i18n-title="tooltip.r2vCommonReferences">公共参考素材</button>
             <label class="bd-batch-run-all hidden" data-r="batch-run-all-wrap" data-i18n-title="tooltip.runSelectAll">
                 <input type="checkbox" data-r="batch-run-all-cb">
                 <span data-i18n="toolbar.selectAll">全选</span>
@@ -465,6 +472,7 @@ export function mountImageBatchPanel(root) {
             <span class="bd-meta" data-r="batch-hint" data-i18n="batch.hint.defaultImage">每组生成 1 张图片</span>
         </div>
         <div class="bd-batch-i2v-notice" data-r="batch-i2v-notice"></div>
+        <div class="bd-r2v-common-panel hidden" data-r="r2v-common-panel"></div>
         <div class="bd-batch-list" data-r="batch-list"></div>`;
     root.appendChild(panel);
     return {
@@ -476,6 +484,8 @@ export function mountImageBatchPanel(root) {
         runSelectBtn: panel.querySelector('[data-a="batch-run-select"]'),
         runSelectAllWrap: panel.querySelector('[data-r="batch-run-all-wrap"]'),
         runSelectAllCb: panel.querySelector('[data-r="batch-run-all-cb"]'),
+        commonToggle: panel.querySelector('[data-a="r2v-common-toggle"]'),
+        commonPanel: panel.querySelector('[data-r="r2v-common-panel"]'),
     };
 }
 
@@ -483,6 +493,8 @@ export function wireBatchRunSelectControls(editor, batchUi) {
     editor.batchRunSelectBtn = batchUi.runSelectBtn;
     editor.batchRunSelectAllWrap = batchUi.runSelectAllWrap;
     editor.batchRunSelectAllCb = batchUi.runSelectAllCb;
+    editor.r2vCommonToggle = batchUi.commonToggle;
+    editor.r2vCommonPanel = batchUi.commonPanel;
     batchUi.runSelectBtn?.addEventListener("click", (e) => {
         e.stopPropagation();
         editor.toggleRunSelectMode?.();
@@ -491,6 +503,11 @@ export function wireBatchRunSelectControls(editor, batchUi) {
         e.stopPropagation();
         if (!editor.isRunSelectEnabled?.()) return;
         editor.setRunSelectionAll?.(batchUi.runSelectAllCb.checked);
+    });
+    batchUi.commonToggle?.addEventListener("click", (e) => {
+        e.stopPropagation();
+        editor._r2vCommonExpanded = !editor._r2vCommonExpanded;
+        editor.renderImageBatchGroups?.();
     });
 }
 
@@ -503,10 +520,11 @@ function cloneRefs(refs) {
     }
 }
 
-/** Copy global.refs into batch segments that have no refs (r2i / r2v). */
+/** Legacy R2I-only migration. R2V Common is never copied into Local. */
 export function migrateGlobalRefsIntoBatchSegments(editor, taskKey) {
     const key = resolveTaskKey(taskKey || editor.getTaskKey?.() || "");
-    if (key !== "r2i" && key !== "r2v") return false;
+    // R2V Common lives in timeline.r2vCommon and must never be copied Local.
+    if (key !== "r2i") return false;
     const globalRefs = editor.timeline?.global?.refs;
     if (!Array.isArray(globalRefs) || !globalRefs.length) return false;
     let moved = false;
@@ -544,9 +562,7 @@ export function ensureImageBatchTimeline(editor) {
     if (!editor.timeline.segments?.length) {
         editor.timeline.segments = [newBatchSegment({ durationSec: defaultDurationSec(taskKey) })];
     }
-    // r2i/r2v need per-group refs. If the user came from rv2v (global refs) or left
-    // refs only on global, copy them into empty batch groups so generation actually
-    // receives reference_image_* — otherwise it silently behaves like t2v/t2i.
+    // Legacy R2I keeps its historical per-group migration. R2V is intentionally excluded.
     migrateGlobalRefsIntoBatchSegments(editor, taskKey);
     for (const seg of editor.timeline.segments) {
         if (isVideoBatchTask(taskKey)) {
@@ -576,7 +592,8 @@ export function ensureImageBatchTimeline(editor) {
         seg.previewFps = seg.previewFps || parseFloat(editor.frameRateWidget?.value || 24);
         if (!seg.id) seg.id = newBatchSegment().id;
     }
-    ensureReferenceAssetSchema(editor.timeline);
+    if (taskKey === "r2v") ensureR2vReferenceAssetSchema(editor.timeline);
+    else ensureReferenceAssetSchema(editor.timeline);
     normalizeImageBatchSegments(editor);
 }
 
@@ -618,7 +635,8 @@ export function normalizeImageBatchSegments(editor) {
     }
     if (!fixed.length) fixed.push(newBatchSegment({ durationSec: defSec }));
     editor.timeline.segments = fixed;
-    ensureReferenceAssetSchema(editor.timeline);
+    if (taskKey === "r2v") ensureR2vReferenceAssetSchema(editor.timeline);
+    else ensureReferenceAssetSchema(editor.timeline);
     editor.timeline.totalFrames = start || fixed[0].frameCount;
 }
 
@@ -628,13 +646,12 @@ export function addImageBatchGroup(editor) {
     editor.timeline.segments.push(newBatchSegment({
         durationSec: defaultDurationSec(taskKey),
         negativePrompt: "",
-        commonAssetIds: commonAssetIds(editor.timeline.global || {}),
-        useCommonPrompt: true,
+        useCommonAssets: true,
+        excludedCommonAssetIds: [],
     }));
     normalizeImageBatchSegments(editor);
     editor.selectedIndex = Math.max(0, editor.timeline.segments.length - 1);
-    editor.renderImageBatchGroups();
-    editor.commit();
+    commitBatchMutation(editor);
     editor.updateVideoNameLabel?.();
     editor.updateDomWidgetHeight?.();
 }
@@ -649,8 +666,7 @@ export function deleteImageBatchGroup(editor, index) {
         0,
         editor.timeline.segments.length - 1,
     );
-    editor.renderImageBatchGroups();
-    editor.commit();
+    commitBatchMutation(editor);
     editor.updateVideoNameLabel?.();
     editor.updateDomWidgetHeight?.();
 }
@@ -692,9 +708,8 @@ async function uploadSegSource(editor, index) {
             // Write genImage immediately so UI updates even if dimension probe fails/hangs.
             seg.genImage = { imageFile, width: 0, height: 0 };
             seg.imageFile = imageFile;
-            editor.renderImageBatchGroups();
             editor.updateOutputPreview?.();
-            editor.commit(false, { syncTimeline: true });
+            commitBatchMutation(editor);
             try {
                 const dims = await readImageDimensions(file);
                 const live = (editor.timeline.segments || []).find((s) => s.id === seg.id) || seg;
@@ -731,10 +746,24 @@ function readImageDimensions(file) {
 
 function batchAssetTarget(editor, index) {
     if (Number(index) === -1) {
-        editor.timeline.global = editor.timeline.global || {};
-        return editor.timeline.global;
+        editor.timeline.r2vCommon = editor.timeline.r2vCommon || { refs: [], refVideos: [], refAudios: [] };
+        return editor.timeline.r2vCommon;
     }
     return editor.timeline.segments?.[index] || null;
+}
+
+function ensureBatchAssetSchema(editor) {
+    if (resolveTaskKey(editor.getTaskKey?.() || editor.taskTypeWidget?.value) === "r2v") {
+        ensureR2vReferenceAssetSchema(editor.timeline);
+    } else {
+        ensureReferenceAssetSchema(editor.timeline);
+    }
+}
+
+function commitBatchMutation(editor) {
+    ensureBatchAssetSchema(editor);
+    editor.commit(true, { syncTimeline: true });
+    editor.renderImageBatchGroups();
 }
 
 async function assignSegRefFromFile(editor, index, slot, file) {
@@ -743,11 +772,10 @@ async function assignSegRefFromFile(editor, index, slot, file) {
         const uploaded = await uploadImage(file);
         const seg = batchAssetTarget(editor, index);
         if (!seg) return;
-        seg.refs = (seg.refs || []).filter((r) => Number(r.index ?? r.slot) !== slot);
-        seg.refs.push({ index: slot, imageFile: relPath(uploaded), imageB64: "" });
-        ensureReferenceAssetSchema(editor.timeline);
-        editor.renderImageBatchGroups();
-        editor.commit();
+        replaceReferenceAssetAtSlot(seg, "refs", slot, {
+            imageFile: relPath(uploaded), imageB64: "",
+        });
+        commitBatchMutation(editor);
     } catch (err) {
         console.error("[MiniMax H3 Motion Director] batch ref upload failed:", err);
     }
@@ -761,20 +789,8 @@ function moveBatchRefSlot(editor, segIndex, fromSlot, toSlot) {
     if (fromSlot === toSlot) return;
     const seg = batchAssetTarget(editor, segIndex);
     if (!seg) return;
-    const refs = [...(seg.refs || [])];
-    const fromRef = refs.find((r) => Number(r.index ?? r.slot) === fromSlot);
-    if (!fromRef) return;
-    const toRef = refs.find((r) => Number(r.index ?? r.slot) === toSlot);
-    seg.refs = refs.filter((r) => {
-        const idx = Number(r.index ?? r.slot);
-        return idx !== fromSlot && idx !== toSlot;
-    });
-    seg.refs.push({ ...fromRef, index: toSlot, slot: undefined });
-    if (toRef) {
-        seg.refs.push({ ...toRef, index: fromSlot, slot: undefined });
-    }
-    editor.renderImageBatchGroups();
-    editor.commit();
+    if (!moveReferenceAssetSlot(seg, "refs", fromSlot, toSlot)) return;
+    commitBatchMutation(editor);
 }
 
 function bindBatchRefDrop(slot, editor, index, slotIndex) {
@@ -825,8 +841,7 @@ function removeSegRef(editor, index, slot) {
     const seg = batchAssetTarget(editor, index);
     if (!seg) return;
     seg.refs = (seg.refs || []).filter((r) => Number(r.index ?? r.slot) !== slot);
-    editor.renderImageBatchGroups();
-    editor.commit();
+    commitBatchMutation(editor);
 }
 
 async function uploadSegAudio(editor, index, slot) {
@@ -835,17 +850,13 @@ async function uploadSegAudio(editor, index, slot) {
             const uploaded = await uploadMedia(file);
             const seg = batchAssetTarget(editor, index);
             if (!seg) return;
-            seg.refAudios = (seg.refAudios || []).filter((r) => Number(r.index ?? r.slot) !== slot);
-            seg.refAudios.push({
-                index: slot,
+            replaceReferenceAssetAtSlot(seg, "refAudios", slot, {
                 audioFile: relPath(uploaded),
                 fileName: uploaded?.name || file.name,
                 type: "input",
                 subfolder: uploaded?.subfolder || "",
             });
-            ensureReferenceAssetSchema(editor.timeline);
-            editor.renderImageBatchGroups();
-            editor.commit();
+            commitBatchMutation(editor);
         } catch (err) {
             console.error("[MiniMax H3 Motion Director] batch audio upload failed:", err);
             alert(t("upload.refAudioFailed", { err: err?.message || err }));
@@ -857,8 +868,7 @@ function removeSegAudio(editor, index, slot) {
     const seg = batchAssetTarget(editor, index);
     if (!seg) return;
     seg.refAudios = (seg.refAudios || []).filter((r) => Number(r.index ?? r.slot) !== slot);
-    editor.renderImageBatchGroups();
-    editor.commit();
+    commitBatchMutation(editor);
 }
 
 async function uploadSegVideo(editor, index, slot) {
@@ -868,17 +878,13 @@ async function uploadSegVideo(editor, index, slot) {
             const seg = batchAssetTarget(editor, index);
             if (!seg) return;
             const videoFile = relPath(uploaded);
-            seg.refVideos = (seg.refVideos || []).filter((r) => Number(r.index ?? r.slot) !== slot);
-            seg.refVideos.push({
-                index: slot,
+            replaceReferenceAssetAtSlot(seg, "refVideos", slot, {
                 videoFile,
                 fileName: uploaded?.name || file.name,
                 type: "input",
                 subfolder: uploaded?.subfolder || "",
             });
-            ensureReferenceAssetSchema(editor.timeline);
-            editor.renderImageBatchGroups();
-            editor.commit();
+            commitBatchMutation(editor);
         } catch (err) {
             console.error("[MiniMax H3 Motion Director] batch video upload failed:", err);
             alert(t("upload.refVideoBatchFailed", { err: err?.message || err }));
@@ -896,9 +902,7 @@ async function uploadSegVideoAudio(editor, index, slot) {
             );
             if (!ref) return;
             ref.pairedAudioFile = relPath(uploaded);
-            ensureReferenceAssetSchema(editor.timeline);
-            editor.renderImageBatchGroups();
-            editor.commit();
+            commitBatchMutation(editor);
         } catch (err) {
             console.error("[MiniMax H3 Motion Director] paired video audio upload failed:", err);
             alert(t("upload.refAudioFailed", { err: err?.message || err }));
@@ -910,8 +914,7 @@ function removeSegVideo(editor, index, slot) {
     const seg = batchAssetTarget(editor, index);
     if (!seg) return;
     seg.refVideos = (seg.refVideos || []).filter((r) => Number(r.index ?? r.slot) !== slot);
-    editor.renderImageBatchGroups();
-    editor.commit();
+    commitBatchMutation(editor);
 }
 
 function fileBaseName(path) {
@@ -948,8 +951,24 @@ function createR2vSection(title, countText) {
     return section;
 }
 
+function r2vSlotLabel(editor, index, kind, slot, ref, file) {
+    const local = Number(index) >= 0;
+    if (!ref) {
+        return t(local ? `batch.r2v.localSlot.${kind}` : `batch.r2v.commonSlot.${kind}`, { n: slot + 1 });
+    }
+    const seg = editor.timeline.segments?.[local ? index : editor.selectedIndex] || {
+        useCommonAssets: true, excludedCommonAssetIds: [], refs: [], refVideos: [], refAudios: [],
+    };
+    const asset = effectiveReferenceAssets(editor.timeline.r2vCommon || {}, seg)
+        .find((item) => item.kind === kind && item.assetId === ref.assetId);
+    const name = fileBaseName(file || ref.imageFile || ref.videoFile || ref.audioFile || ref.fileName || "");
+    return `${name || t(`batch.r2v.assetKind.${kind}`)}${asset?.officialTag ? ` · ${asset.officialTag}` : ""}`;
+}
+
 function renderAudioSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
-    const label = refAudioLabel(slot);
+    const label = r2v
+        ? r2vSlotLabel(editor, index, "audio", slot, ref, ref?.audioFile || ref?.fileName)
+        : refAudioLabel(slot);
     const file = ref?.audioFile || ref?.fileName || "";
     el.className = `bd-batch-audio${file ? " has-audio" : ""}`;
     el.title = file
@@ -1027,7 +1046,9 @@ function renderAudioSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
 }
 
 function renderVideoSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
-    const label = refVideoLabel(slot);
+    const label = r2v
+        ? r2vSlotLabel(editor, index, "video", slot, ref, ref?.videoFile || ref?.fileName)
+        : refVideoLabel(slot);
     const file = ref?.videoFile || "";
     const posterSrc = ref?.previewImageUrl
         || (ref?.previewImageFile ? viewUrl(ref.previewImageFile) : "");
@@ -1285,8 +1306,8 @@ function appendR2vMediaSections(card, seg, index, editor) {
 }
 
 function appendCommonSelection(card, editor, seg, index) {
-    const commonAssets = allKnownReferenceAssets(editor.timeline.global || {});
-    const selected = new Set((seg.commonAssetIds || []).map(String));
+    const commonAssets = allKnownReferenceAssets(editor.timeline.r2vCommon || {});
+    const excluded = new Set((seg.excludedCommonAssetIds || []).map(String));
     const section = document.createElement("div");
     section.className = "bd-r2v-common-select";
     const head = document.createElement("div");
@@ -1296,9 +1317,9 @@ function appendCommonSelection(card, editor, seg, index) {
     head.appendChild(title);
     const actions = document.createElement("div");
     actions.className = "bd-r2v-common-actions";
-    for (const [key, ids] of [
-        ["batch.r2v.selectAll", commonAssets.map((asset) => asset.assetId)],
-        ["batch.r2v.selectNone", []],
+    for (const [key, useCommon, excludedIds] of [
+        ["batch.r2v.selectAll", true, []],
+        ["batch.r2v.selectNone", false, []],
     ]) {
         const button = document.createElement("button");
         button.type = "button";
@@ -1306,28 +1327,27 @@ function appendCommonSelection(card, editor, seg, index) {
         button.onclick = (event) => {
             event.preventDefault();
             event.stopPropagation();
-            seg.commonAssetIds = [...ids];
-            editor.renderImageBatchGroups();
-            editor.commit();
+            seg.useCommonAssets = useCommon;
+            seg.excludedCommonAssetIds = [...excludedIds];
+            commitBatchMutation(editor);
         };
         actions.appendChild(button);
     }
     head.appendChild(actions);
     section.appendChild(head);
 
-    const usePrompt = document.createElement("label");
-    usePrompt.className = "bd-r2v-use-common-prompt";
-    const promptCheckbox = document.createElement("input");
-    promptCheckbox.type = "checkbox";
-    promptCheckbox.checked = seg.useCommonPrompt !== false;
-    promptCheckbox.onchange = (event) => {
+    const useAssets = document.createElement("label");
+    useAssets.className = "bd-r2v-use-common-assets";
+    const useCheckbox = document.createElement("input");
+    useCheckbox.type = "checkbox";
+    useCheckbox.checked = seg.useCommonAssets !== false;
+    useCheckbox.onchange = (event) => {
         event.stopPropagation();
-        seg.useCommonPrompt = promptCheckbox.checked;
-        editor.scheduleTimelineSync();
-        editor.commit();
+        seg.useCommonAssets = useCheckbox.checked;
+        commitBatchMutation(editor);
     };
-    usePrompt.append(promptCheckbox, document.createTextNode(t("batch.r2v.useCommonPrompt")));
-    section.appendChild(usePrompt);
+    useAssets.append(useCheckbox, document.createTextNode(t("batch.r2v.useCommonAssets")));
+    section.appendChild(useAssets);
 
     const items = document.createElement("div");
     items.className = "bd-r2v-common-items";
@@ -1342,17 +1362,16 @@ function appendCommonSelection(card, editor, seg, index) {
         label.className = "bd-r2v-common-item";
         const checkbox = document.createElement("input");
         checkbox.type = "checkbox";
-        checkbox.checked = selected.has(asset.assetId);
+        checkbox.checked = seg.useCommonAssets !== false && !excluded.has(asset.assetId);
         checkbox.onchange = (event) => {
             event.stopPropagation();
-            const next = new Set((seg.commonAssetIds || []).map(String));
-            if (checkbox.checked) next.add(asset.assetId);
-            else next.delete(asset.assetId);
-            seg.commonAssetIds = commonAssets
-                .map((item) => item.assetId)
-                .filter((assetId) => next.has(assetId));
-            editor.renderImageBatchGroups();
-            editor.commit();
+            setCommonAssetEnabled(
+                seg,
+                commonAssets.map((item) => item.assetId),
+                asset.assetId,
+                checkbox.checked,
+            );
+            commitBatchMutation(editor);
         };
         const text = document.createElement("span");
         const kind = t(`batch.r2v.assetKind.${asset.kind}`);
@@ -1365,10 +1384,10 @@ function appendCommonSelection(card, editor, seg, index) {
     card.appendChild(section);
 }
 
-function appendCommonPoolCard(list, editor) {
-    const common = editor.timeline.global || (editor.timeline.global = {});
+function appendCommonPoolCard(panel, editor) {
+    const common = editor.timeline.r2vCommon || (editor.timeline.r2vCommon = { refs: [], refVideos: [], refAudios: [] });
     const card = document.createElement("div");
-    card.className = "bd-batch-card bd-batch-r2v bd-r2v-common-card";
+    card.className = "bd-batch-r2v bd-r2v-common-card";
     const head = document.createElement("div");
     head.className = "bd-batch-head";
     const title = document.createElement("b");
@@ -1378,33 +1397,12 @@ function appendCommonPoolCard(list, editor) {
     hint.textContent = t("batch.r2v.commonPoolHint");
     head.append(title, hint);
     card.appendChild(head);
-    const main = appendR2vMediaSections(card, common, -1, editor);
-    const promptWrap = document.createElement("div");
-    promptWrap.className = "bd-batch-prompts";
-    promptWrap.innerHTML = `
-        <span class="bd-label">${t("batch.r2v.commonPrompt")}</span>
-        <textarea data-f="common-prompt" placeholder=""></textarea>`;
-    const prompt = promptWrap.querySelector("textarea");
-    prompt.value = common.prompt || "";
-    prompt.placeholder = t("placeholder.batchR2vCommon");
-    prompt.oninput = (event) => {
-        common.prompt = event.target.value;
-        editor.scheduleTimelineSync();
-    };
-    wirePromptImageMentions(editor, prompt, () => ({
-        assets: effectiveReferenceAssets(common, {
-            commonAssetIds: commonAssetIds(common),
-            refs: [],
-            refVideos: [],
-            refAudios: [],
-        }),
-    }));
-    main.appendChild(promptWrap);
-    list.appendChild(card);
+    appendR2vMediaSections(card, common, -1, editor);
+    panel.appendChild(card);
 }
 
 function renderR2vRefSlot(el, ref, slot, index, editor) {
-    const label = refImageLabel(slot);
+    const label = r2vSlotLabel(editor, index, "picture", slot, ref, ref?.imageFile);
     const has = !!ref?.imageFile;
     el.classList.toggle("has-img", has);
     el.innerHTML = "";
@@ -1615,6 +1613,8 @@ function renderPreview(el, seg, running, isVideo, fps) {
 export function renderImageBatchGroups(editor) {
     const list = editor.batchList;
     if (!list) return;
+    for (const controller of editor._batchPromptMentionControllers || []) controller?.destroy?.();
+    editor._batchPromptMentionControllers = [];
     flushBatchDurationInputs(editor);
     stopAllPlayers(list);
     const key = resolveTaskKey(editor.getTaskKey?.() || editor.taskTypeWidget?.value);
@@ -1672,9 +1672,20 @@ export function renderImageBatchGroups(editor) {
     }
 
     list.innerHTML = "";
+    if (editor.r2vCommonToggle) {
+        editor.r2vCommonToggle.classList.toggle("hidden", key !== "r2v");
+        editor.r2vCommonToggle.textContent = t("batch.r2v.commonReferences");
+        editor.r2vCommonToggle.title = t("tooltip.r2vCommonReferences");
+    }
+    if (editor.r2vCommonPanel) {
+        editor.r2vCommonPanel.replaceChildren();
+        editor.r2vCommonPanel.classList.toggle("hidden", key !== "r2v" || !editor._r2vCommonExpanded);
+    }
     if (key === "r2v") {
-        ensureReferenceAssetSchema(editor.timeline);
-        appendCommonPoolCard(list, editor);
+        ensureR2vReferenceAssetSchema(editor.timeline);
+        if (editor._r2vCommonExpanded && editor.r2vCommonPanel) {
+            appendCommonPoolCard(editor.r2vCommonPanel, editor);
+        }
     }
     editor.timeline.segments.forEach((seg, index) => {
         const isR2v = key === "r2v";
@@ -1684,6 +1695,7 @@ export function renderImageBatchGroups(editor) {
             : (variant === "source" ? "bd-batch-source"
                 : (variant === "refs" ? "bd-batch-refs" : "bd-batch-plain"));
         card.className = `bd-batch-card ${layoutClass}`;
+        card.dataset.segmentIndex = String(index);
         const runSelectOn = !!(editor.isRunSelectEnabled?.() && editor.supportsRunSelect?.());
         const runEnabled = !runSelectOn || !!editor.isSegmentRunEnabled?.(index);
         // r2v: always show focus selected. t2v/i2v: only run-select participation chrome.
@@ -1865,12 +1877,13 @@ export function renderImageBatchGroups(editor) {
             editor.scheduleTimelineSync();
         };
         if (isR2v) {
-            wirePromptImageMentions(editor, promptEl, () => ({
-                assets: effectiveReferenceAssets(editor.timeline.global || {}, seg),
+            const controller = wirePromptImageMentions(editor, promptEl, () => ({
+                assets: referenceAssetStates(editor.timeline.r2vCommon || {}, seg),
                 refs: seg.refs || [],
                 audios: seg.refAudios || [],
                 videos: seg.refVideos || [],
             }));
+            if (controller) editor._batchPromptMentionControllers.push(controller);
         }
 
         const preview = document.createElement("div");
@@ -1916,7 +1929,7 @@ export function setImageBatchPreview(editor, segmentIndex, imageB64, extra = {})
 
     // Live sampling updates: patch the card preview in-place (avoid full re-render thrash).
     if (extra.live && imageB64) {
-        const card = editor.batchList?.children?.[segmentIndex];
+        const card = editor.batchList?.querySelector?.(`[data-segment-index="${segmentIndex}"]`);
         const preview = card?.querySelector?.(".bd-batch-preview");
         if (preview) {
             const step = seg.previewStep;
@@ -2048,4 +2061,10 @@ export function updateR2vToolbarBtns(editor) {
     const show = !!editor?.isR2vBatch?.() && !externalLocked;
     addBtn.classList.toggle("hidden", !show);
     addBtn.disabled = !show;
+    const deleteBtn = editor?.root?.querySelector?.('[data-a="del"]');
+    if (deleteBtn && editor?.isR2vBatch?.()) {
+        const lastGroup = (editor.timeline?.segments?.length || 0) <= 1;
+        deleteBtn.disabled = externalLocked || lastGroup;
+        deleteBtn.title = lastGroup ? t("batch.r2v.keepOneGroup") : t("tooltip.deleteSegment");
+    }
 }

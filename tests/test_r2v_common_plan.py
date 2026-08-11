@@ -37,7 +37,9 @@ def _timeline():
         "editMode": "segment",
         "global": {
             "taskType": "r2v",
-            "prompt": "COMMON",
+            "prompt": "GLOBAL MUST NOT LEAK",
+        },
+        "r2vCommon": {
             "refs": common,
         },
         "output": {"width": 64, "height": 64, "mode": "fixed"},
@@ -45,22 +47,22 @@ def _timeline():
             {
                 "frameCount": 5,
                 "prompt": f"one {semantic_reference_token('picture', 'D')}",
-                "useCommonPrompt": True,
-                "commonAssetIds": ["A", "B", "C"],
+                "useCommonAssets": True,
+                "excludedCommonAssetIds": [],
                 "refs": [{"index": 0, "assetId": "D", "imageB64": "unused"}],
             },
             {
                 "frameCount": 5,
                 "prompt": "pure scene",
-                "useCommonPrompt": False,
-                "commonAssetIds": [],
+                "useCommonAssets": False,
+                "excludedCommonAssetIds": [],
                 "refs": [],
             },
             {
                 "frameCount": 5,
                 "prompt": f"three {semantic_reference_token('picture', 'C')}",
-                "useCommonPrompt": True,
-                "commonAssetIds": ["A", "B", "C"],
+                "useCommonAssets": True,
+                "excludedCommonAssetIds": [],
                 "refs": [{"index": 0, "assetId": "E", "imageB64": "unused"}],
             },
         ],
@@ -86,15 +88,17 @@ def test_r2v_plan_uses_selected_common_plus_local_without_previous_bundle(monkey
         [],
         ["A", "B", "C", "E"],
     ]
-    assert director_plan.segments[0].prompt == "COMMON\n\none <Picture 4>"
+    assert director_plan.segments[0].prompt == "one <Picture 4>"
     assert director_plan.segments[1].prompt == "pure scene"
-    assert director_plan.segments[2].prompt == "COMMON\n\nthree <Picture 3>"
+    assert director_plan.segments[2].prompt == "three <Picture 3>"
     assert not hasattr(director_plan.segments[1], "material_inherited")
 
 
-def test_disabled_common_prompt_reference_fails_during_plan_preflight(monkeypatch):
+def test_disabled_common_asset_reference_fails_during_plan_preflight(monkeypatch):
     _install_loaders(monkeypatch)
     timeline = _timeline()
+    timeline["segments"][1]["useCommonAssets"] = True
+    timeline["segments"][1]["excludedCommonAssetIds"] = ["B"]
     timeline["segments"][1]["prompt"] = semantic_reference_token("picture", "B")
 
     try:
@@ -129,13 +133,15 @@ def test_external_r2v_groups_use_same_common_selection_and_never_inherit_local(m
     timeline = {
         "frameRate": 24,
         "global": {
-            "prompt": "COMMON",
+            "prompt": "GLOBAL MUST NOT LEAK",
+        },
+        "r2vCommon": {
             "refs": [{"index": 0, "assetId": "A", "imageB64": "unused"}],
         },
         "output": {"width": 64, "height": 64, "mode": "fixed"},
         "segments": [
-            {"useCommonPrompt": True, "commonAssetIds": ["A"]},
-            {"useCommonPrompt": False, "commonAssetIds": []},
+            {"useCommonAssets": True, "excludedCommonAssetIds": []},
+            {"useCommonAssets": False, "excludedCommonAssetIds": []},
         ],
     }
 
@@ -162,5 +168,6 @@ def test_external_r2v_groups_use_same_common_selection_and_never_inherit_local(m
 
     assert [x.asset_id for x in result.segments[0].refs] == ["A", "external-picture-0-0"]
     assert result.segments[1].refs == []
-    assert "COMMON\n\none" in result.segments[0].prompt
+    assert result.segments[0].prompt.endswith("one")
+    assert "GLOBAL MUST NOT LEAK" not in result.segments[0].prompt
     assert result.segments[1].prompt == "pure scene"

@@ -89,7 +89,17 @@ import {
     updateFl2vToolbarBtns,
 } from "./minimax_fl2v.js";
 import { mountPromptImageMentions } from "./minimax_prompt_mentions.js";
-import { ensureReferenceAssetSchema } from "./minimax_reference_assets.mjs";
+import {
+    createTimelineShortcutHandler,
+} from "./minimax_prompt_mentions_core.mjs";
+import {
+    ensureR2vReferenceAssetSchema,
+    ensureReferenceAssetSchema,
+} from "./minimax_reference_assets.mjs";
+import {
+    restoreBatchTaskWorkspace,
+    stashBatchTaskWorkspace,
+} from "./minimax_batch_workspaces.mjs";
 import {
     VIDEO_CONTINUITY_STRATEGIES,
     applyVideoStrategyToWidgets,
@@ -251,6 +261,7 @@ function stripTimelineEphemeralFields(timeline) {
     if (!timeline || typeof timeline !== "object") return;
     delete timeline.videoWorkspace;
     delete timeline.batchWorkspace;
+    delete timeline.batchTaskWorkspaces;
     delete timeline.fl2vWorkspace;
     // Shallow-cloned payloads still share nested refs with live state — reassign, don't mutate.
     if (Array.isArray(timeline.segments)) {
@@ -276,6 +287,16 @@ function stripTimelineEphemeralFields(timeline) {
                     subfolder: timeline.global.referenceVideo.subfolder || "",
                 }
                 : timeline.global.referenceVideo,
+        };
+    }
+    if (timeline.r2vCommon && typeof timeline.r2vCommon === "object") {
+        timeline.r2vCommon = {
+            refs: Array.isArray(timeline.r2vCommon.refs)
+                ? timeline.r2vCommon.refs.map(sanitizeRefImage) : [],
+            refAudios: Array.isArray(timeline.r2vCommon.refAudios)
+                ? timeline.r2vCommon.refAudios.map(sanitizeRefAudio) : [],
+            refVideos: Array.isArray(timeline.r2vCommon.refVideos)
+                ? timeline.r2vCommon.refVideos.map(sanitizeRefVideo) : [],
         };
     }
     if (timeline.video && typeof timeline.video === "object") {
@@ -1629,7 +1650,8 @@ function parseTimeline(raw, totalFrames, fps) {
             seg.genImage = seg.genImage || { imageFile: seg.imageFile || "" };
             seg.negativePrompt = seg.negativePrompt ?? "";
         }
-        ensureReferenceAssetSchema(data);
+        if (resolveTaskKey(data.global?.taskType) === "r2v") ensureR2vReferenceAssetSchema(data);
+        else ensureReferenceAssetSchema(data);
         data.gen = data.gen || { defaultFrameCount: 124 };
         if (data.global) {
             data.global.genImage = data.global.genImage || { imageFile: data.global.imageFile || "" };
@@ -1994,7 +2016,8 @@ class MiniMaxH3MotionDirectorEditor {
                 });
             });
             normalizeImageBatchSegments(this);
-            ensureReferenceAssetSchema(this.timeline);
+            if (this.getTaskKey() === "r2v") ensureR2vReferenceAssetSchema(this.timeline);
+            else ensureReferenceAssetSchema(this.timeline);
             this.selectedIndex = Math.min(this.selectedIndex ?? 0, Math.max(0, this.timeline.segments.length - 1));
             this.renderImageBatchGroups?.();
             this.scheduleRender?.();
@@ -2398,6 +2421,7 @@ class MiniMaxH3MotionDirectorEditor {
         this.viewport.className = "bd-viewport";
         this.canvas = document.createElement("canvas");
         this.canvas.className = "bd-canvas";
+        this.canvas.tabIndex = 0;
         this.viewport.appendChild(this.canvas);
         this.mainBody.appendChild(this.viewport);
         this.ctx = this.canvas.getContext("2d");
@@ -2813,7 +2837,7 @@ class MiniMaxH3MotionDirectorEditor {
         this.globalNegative.oninput = () => this.onNegativePrompt(this.globalNegative.value);
         this.segNegative.oninput = () => this.onNegativePrompt(this.segNegative.value);
 
-        mountPromptImageMentions(this);
+        this._promptMentionControllers = mountPromptImageMentions(this);
 
         this.outMode.onchange = () => this.onOutputField("mode", this.outMode.value);
         if (this.outAspect) {
@@ -2875,6 +2899,7 @@ class MiniMaxH3MotionDirectorEditor {
         this.genSegFc?.addEventListener("change", () => this.onGenSegFcChange());
 
         this.canvas.addEventListener("mousedown", (e) => this.onMouseDown(e));
+        this.canvas.addEventListener("mousedown", () => this.canvas.focus({ preventScroll: true }));
         this.canvas.addEventListener("dblclick", (e) => {
             if (this.isFl2vMode()) {
                 stopDomEvent(e);
@@ -2938,28 +2963,16 @@ class MiniMaxH3MotionDirectorEditor {
 
         this.root.addEventListener("mouseenter", () => { this._isHovering = true; });
         this.root.addEventListener("mouseleave", () => { this._isHovering = false; });
-        this._onKeyDown = (e) => {
-            if (!this._isHovering) return;
-            const tag = document.activeElement?.tagName;
-            if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
-            if ((e.key === "Delete" || e.key === "Backspace") && this.timeline.segments.length >= 1) {
-                // Split points only delete via the toolbar button; Delete removes segments.
-                if (this.selectedSplitFrame != null) {
-                    e.preventDefault();
-                    return;
-                }
-                this.deleteSelectedSegment();
-                e.preventDefault();
-            } else if (e.code === "Space") {
-                this.togglePlay(); e.preventDefault();
-            } else if (e.key === "ArrowLeft") {
-                this.stepFrame(e.shiftKey ? -10 : -1);
-                e.preventDefault();
-            } else if (e.key === "ArrowRight") {
-                this.stepFrame(e.shiftKey ? 10 : 1);
-                e.preventDefault();
-            }
-        };
+        this._onKeyDown = createTimelineShortcutHandler({
+            timelineElement: () => this.canvas,
+            getActiveElement: () => document.activeElement,
+            hasSelectedSplit: () => this.selectedSplitFrame != null,
+            canDelete: () => this.timeline.segments.length >= 1
+                && !(this.isR2vBatch() && this.timeline.segments.length <= 1),
+            onDelete: () => this.deleteSelectedSegment(),
+            onTogglePlay: () => this.togglePlay(),
+            onStepFrame: (delta) => this.stepFrame(delta),
+        });
         window.addEventListener("keydown", this._onKeyDown, true);
 
         this.root.addEventListener("dragover", (e) => e.preventDefault());
@@ -2995,6 +3008,10 @@ class MiniMaxH3MotionDirectorEditor {
         this._unsubLocale?.();
         this._unsubLocale = null;
         this._closeBdModal();
+        for (const controller of this._promptMentionControllers || []) controller?.destroy?.();
+        this._promptMentionControllers = [];
+        for (const controller of this._batchPromptMentionControllers || []) controller?.destroy?.();
+        this._batchPromptMentionControllers = [];
         this._directorModalController?.destroy();
         this._directorModalController = null;
         this._directorModalOverlay = null;
@@ -3197,7 +3214,7 @@ class MiniMaxH3MotionDirectorEditor {
         else sel.add(index);
         this.timeline.runSelection = [...sel].sort((a, b) => a - b);
         this.updateRunSelectUI();
-        this.commit(false, { syncTimeline: true });
+        this.commit(this.isImageBatch(), { syncTimeline: true });
         if (this.isImageBatch()) this.renderImageBatchGroups();
         else this.scheduleRender();
     }
@@ -3218,7 +3235,7 @@ class MiniMaxH3MotionDirectorEditor {
             }
         }
         this.updateRunSelectUI();
-        this.commit(false, { syncTimeline: true });
+        this.commit(this.isImageBatch(), { syncTimeline: true });
         if (this.isImageBatch()) this.renderImageBatchGroups();
         else this.scheduleRender();
     }
@@ -3235,7 +3252,7 @@ class MiniMaxH3MotionDirectorEditor {
         const n = this.getRunnableSegmentCount();
         this.timeline.runSelection = on ? Array.from({ length: n }, (_, i) => i) : [];
         this.updateRunSelectUI();
-        this.commit(false, { syncTimeline: true });
+        this.commit(this.isImageBatch(), { syncTimeline: true });
         if (this.isImageBatch()) this.renderImageBatchGroups();
         else this.scheduleRender();
     }
@@ -3481,6 +3498,27 @@ class MiniMaxH3MotionDirectorEditor {
         );
         // Drop snapshot after restore so later batch edits are not clobbered by a stale stash.
         this.timeline.batchWorkspace = null;
+        return true;
+    }
+
+    _stashBatchTaskWorkspace(taskKey) {
+        const key = resolveTaskKey(taskKey);
+        stashBatchTaskWorkspace(this.timeline, key, {
+            segments: JSON.parse(JSON.stringify(this.timeline.segments)),
+            selectedIndex: this.selectedIndex,
+            runSelectEnabled: !!this.timeline.runSelectEnabled,
+            runSelection: [...(this.timeline.runSelection || [])],
+        });
+    }
+
+    _restoreBatchTaskWorkspace(taskKey) {
+        const key = resolveTaskKey(taskKey);
+        const workspace = restoreBatchTaskWorkspace(this.timeline, key);
+        if (!workspace) return false;
+        this.timeline.segments = workspace.segments;
+        this.selectedIndex = clamp(workspace.selectedIndex || 0, 0, this.timeline.segments.length - 1);
+        this.timeline.runSelectEnabled = !!workspace.runSelectEnabled;
+        this.timeline.runSelection = [...(workspace.runSelection || [])];
         return true;
     }
 
@@ -5329,10 +5367,12 @@ class MiniMaxH3MotionDirectorEditor {
         this.seekBar.max = Math.max(0, this.getTotalFrames() - 1);
         if (syncTimeline) this.scheduleTimelineSync();
         if (!skipRender) this.scheduleRender();
-        if (this.isGlobalMode() && taskUsesReferenceImages(this.getTaskKey())) {
-            this.renderRefSlots(this.timeline.global.refs, this.globalRefsBox, true);
-        } else if (this.isImageBatch()) this.renderImageBatchGroups();
-        else this.updateSelectionUI();
+        if (!skipRender) {
+            if (this.isGlobalMode() && taskUsesReferenceImages(this.getTaskKey())) {
+                this.renderRefSlots(this.timeline.global.refs, this.globalRefsBox, true);
+            } else if (this.isImageBatch()) this.renderImageBatchGroups();
+            else this.updateSelectionUI();
+        }
         refreshDirectorContinuityUi(this.node, this);
     }
 
@@ -7149,6 +7189,7 @@ class MiniMaxH3MotionDirectorEditor {
             return;
         }
         if (this.isR2vBatch()) {
+            if ((this.timeline.segments || []).length <= 1) return;
             deleteImageBatchGroup(this, this.selectedIndex);
             this.currentFrame = clamp(this.currentFrame, 0, Math.max(0, this.getTotalFrames() - 1));
             if (this.seekBar) {
@@ -8023,7 +8064,11 @@ class MiniMaxH3MotionDirectorEditor {
     updateSelectionUI() {
         this.timeline.global = this.timeline.global || { taskType: "", prompt: "", refs: [] };
         if (this.globalTask) this.globalTask.value = this.timeline.global.taskType || "";
-        if (this.globalPrompt) this.globalPrompt.value = this.timeline.global.prompt || "";
+        if (this.globalPrompt) {
+            const value = this.timeline.global.prompt || "";
+            if (this.globalPrompt._mmxMentionController) this.globalPrompt._mmxMentionController.setValue(value);
+            else this.globalPrompt.value = value;
+        }
         this.syncNegativeFromWidget();
         updateFl2vToolbarBtns(this);
         updateR2vToolbarBtns(this);
@@ -8065,7 +8110,9 @@ class MiniMaxH3MotionDirectorEditor {
         const segKey = resolveTaskKey(liveSeg.taskType || this.timeline.global?.taskType || this.getTaskKey());
         this.segLabel.textContent = t("panel.segmentN", { n: this.selectedIndex + 1 });
         this._updateSegInfoFromSegment(liveSeg);
-        this.segPrompt.value = liveSeg.prompt || "";
+        const value = liveSeg.prompt || "";
+        if (this.segPrompt._mmxMentionController) this.segPrompt._mmxMentionController.setValue(value);
+        else this.segPrompt.value = value;
         if (taskUsesReferenceImages(segKey)) {
             this.renderRefSlots(liveSeg.refs, this.segRefsBox, false);
         }
@@ -8495,6 +8542,23 @@ class MiniMaxH3MotionDirectorEditor {
             const prevTaskKey = resolveTaskKey(
                 this.timeline.global?.taskType || this.globalTask?.value || this.taskTypeWidget?.value || "",
             );
+            const nextTaskKey = resolveTaskKey(value);
+            const switchingBatchTask = this.getDirectorMode() === "prompt_batch"
+                && getDirectorMode(value) === "prompt_batch"
+                && prevTaskKey !== nextTaskKey;
+            if (switchingBatchTask) {
+                this._stashBatchTaskWorkspace(prevTaskKey);
+                if (!this._restoreBatchTaskWorkspace(nextTaskKey)) {
+                    this.timeline.segments = [newBatchSegment({
+                        prompt: "",
+                        negativePrompt: "",
+                        useCommonAssets: true,
+                        excludedCommonAssetIds: [],
+                    })];
+                    this.selectedIndex = 0;
+                    this._clearLiveRunSelection();
+                }
+            }
             this.timeline.global[field] = value;
             const prevMode = this._directorMode || "video";
             if (this.globalTask && this.globalTask.value !== value) this.globalTask.value = value;

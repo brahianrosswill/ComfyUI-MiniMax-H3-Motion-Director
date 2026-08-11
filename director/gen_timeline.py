@@ -18,7 +18,6 @@ from ..lib.task_prompts import resolve_task_key
 from .effective_refs import (
     compile_effective_references,
     compile_semantic_prompt,
-    concat_common_prompt,
 )
 
 log = logging.getLogger("ComfyUI-MiniMax-H3-Motion-Director.director.gen")
@@ -379,6 +378,7 @@ def build_gen_director_plan(
     )
 
     global_block = timeline.get("global") or {}
+    r2v_common_block = timeline.get("r2vCommon") or timeline.get("r2v_common") or {}
     edit_mode = timeline.get("editMode") or timeline.get("edit_mode") or "global"
     if is_prompt_batch_timeline(timeline, resolve_task_key(global_block.get("taskType") or global_task_type or "")):
         edit_mode = "segment"
@@ -393,13 +393,14 @@ def build_gen_director_plan(
     submode = gen_submode(timeline, task_key)
     prompt = global_block.get("prompt") or global_prompt or ""
     global_refs = _load_refs(global_block.get("refs") or [])
-    common_picture_raw = list(global_block.get("refs") or [])
+    common_picture_raw = list(r2v_common_block.get("refs") or [])
     common_video_raw = list(
-        global_block.get("refVideos") or global_block.get("ref_videos") or []
+        r2v_common_block.get("refVideos") or r2v_common_block.get("ref_videos") or []
     )
     common_audio_raw = list(
-        global_block.get("refAudios") or global_block.get("ref_audios") or []
+        r2v_common_block.get("refAudios") or r2v_common_block.get("ref_audios") or []
     )
+    common_pictures = _load_refs(common_picture_raw)
     common_known_assets = _known_assets(
         ("picture", common_picture_raw),
         ("video", common_video_raw),
@@ -529,26 +530,28 @@ def build_gen_director_plan(
                 )
 
         if edit_mode != "global" and seg_task_key == "r2v":
-            selected_raw = seg_data.get("commonAssetIds")
-            if selected_raw is None:
-                selected_raw = seg_data.get("common_asset_ids")
-            if selected_raw is None:
-                # New R2V segments default to all assets currently in the pool.
-                selected_raw = [
-                    _raw_asset_id(item, kind, pos)
-                    for kind, items in (
-                        ("picture", common_picture_raw),
-                        ("video", common_video_raw),
-                        ("audio", common_audio_raw),
-                    )
-                    for pos, item in enumerate(items)
-                    if isinstance(item, dict)
-                ]
-            selected_common_ids = {str(value) for value in (selected_raw or [])}
-            use_common_prompt_raw = seg_data.get("useCommonPrompt")
-            if use_common_prompt_raw is None:
-                use_common_prompt_raw = seg_data.get("use_common_prompt", True)
-            use_common_prompt = bool(use_common_prompt_raw)
+            all_common_ids = {
+                _raw_asset_id(item, kind, pos)
+                for kind, items in (
+                    ("picture", common_picture_raw),
+                    ("video", common_video_raw),
+                    ("audio", common_audio_raw),
+                )
+                for pos, item in enumerate(items)
+                if isinstance(item, dict)
+            }
+            excluded_common_ids = {
+                str(value) for value in (
+                    seg_data.get("excludedCommonAssetIds")
+                    or seg_data.get("excluded_common_asset_ids")
+                    or []
+                )
+            }
+            selected_common_ids = (
+                all_common_ids - excluded_common_ids
+                if bool(seg_data.get("useCommonAssets", seg_data.get("use_common_assets", True)))
+                else set()
+            )
 
             local_refs = list(seg_refs)
             local_audios = list(seg_ref_audios)
@@ -564,7 +567,7 @@ def build_gen_director_plan(
                 seg_task_key, _load_ref_audios(common_audio_raw)
             )
             effective = compile_effective_references(
-                common_pictures=global_refs,
+                common_pictures=common_pictures,
                 common_videos=common_videos,
                 common_audios=common_audios,
                 common_video_audios=common_video_audios,
@@ -580,11 +583,8 @@ def build_gen_director_plan(
             seg_ref_audios = effective.audios
             seg_ref_video_audios = effective.video_audios
             reference_tags = effective.tags
-            seg_prompt = concat_common_prompt(
-                prompt,
-                local_prompt,
-                use_common_prompt=use_common_prompt,
-            )
+            # R2V has no Common Prompt. Every segment owns its full prompt.
+            seg_prompt = local_prompt
             seg_prompt = compile_semantic_prompt(
                 seg_prompt,
                 reference_tags,

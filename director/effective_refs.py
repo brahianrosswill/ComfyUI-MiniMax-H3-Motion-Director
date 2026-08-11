@@ -42,19 +42,6 @@ def semantic_reference_token(kind: str, asset_id: str) -> str:
     return f"{{{{mmx-ref:{key}:{identity}}}}}"
 
 
-def concat_common_prompt(
-    common_prompt: str | None,
-    local_prompt: str | None,
-    *,
-    use_common_prompt: bool,
-) -> str:
-    common = (common_prompt or "").strip() if use_common_prompt else ""
-    local = (local_prompt or "").strip()
-    if common and local:
-        return f"{common}\n\n{local}"
-    return common or local
-
-
 def _asset_id(item: Any) -> str:
     return str(getattr(item, "asset_id", "") or "").strip()
 
@@ -193,6 +180,5 @@ __all__ = [
     "SemanticReferenceError",
     "compile_effective_references",
     "compile_semantic_prompt",
-    "concat_common_prompt",
     "semantic_reference_token",
 ]

@@ -42,6 +42,55 @@ function hasMedia(kind, item) {
     return !!(item.audioFile || item.fileName);
 }
 
+export function replaceReferenceAssetAtSlot(container, field, slot, nextItem) {
+    if (!container || !["refs", "refVideos", "refAudios"].includes(field)) return null;
+    const items = Array.isArray(container[field]) ? container[field] : [];
+    const current = items.find((item) => Number(item.index ?? item.slot) === Number(slot));
+    const replacement = {
+        ...nextItem,
+        index: Number(slot),
+        assetId: current?.assetId || current?.asset_id || nextItem?.assetId || nextItem?.asset_id || "",
+    };
+    container[field] = items.filter((item) => Number(item.index ?? item.slot) !== Number(slot));
+    container[field].push(replacement);
+    return replacement;
+}
+
+export function moveReferenceAssetSlot(container, field, fromSlot, toSlot) {
+    if (!container || !["refs", "refVideos", "refAudios"].includes(field)) return false;
+    const items = Array.isArray(container[field]) ? container[field] : [];
+    const from = items.find((item) => Number(item.index ?? item.slot) === Number(fromSlot));
+    if (!from || Number(fromSlot) === Number(toSlot)) return false;
+    const to = items.find((item) => Number(item.index ?? item.slot) === Number(toSlot));
+    container[field] = items.filter((item) => {
+        const index = Number(item.index ?? item.slot);
+        return index !== Number(fromSlot) && index !== Number(toSlot);
+    });
+    container[field].push({ ...from, index: Number(toSlot), slot: undefined });
+    if (to) container[field].push({ ...to, index: Number(fromSlot), slot: undefined });
+    return true;
+}
+
+export function setCommonAssetEnabled(segment, allAssetIds, assetId, enabled) {
+    if (!segment) return false;
+    const knownIds = [...new Set((allAssetIds || []).map(String))];
+    const excluded = new Set(
+        segment.useCommonAssets === false
+            ? knownIds
+            : (segment.excludedCommonAssetIds || []).map(String),
+    );
+    const identity = String(assetId || "");
+    if (!identity) return false;
+    if (enabled) excluded.delete(identity);
+    else excluded.add(identity);
+    segment.useCommonAssets = true;
+    segment.excludedCommonAssetIds = [
+        ...knownIds.filter((id) => excluded.has(id)),
+        ...[...excluded].filter((id) => !knownIds.includes(id)),
+    ];
+    return true;
+}
+
 function ensureIds(container, scope, idFactory, used) {
     for (const [kind, items] of arraysFor(container)) {
         for (const item of items) {
@@ -59,7 +108,7 @@ function ensureIds(container, scope, idFactory, used) {
     }
 }
 
-export function commonAssetIds(globalBlock) {
+export function referenceAssetIds(globalBlock) {
     const ids = [];
     for (const [kind, items] of arraysFor(globalBlock)) {
         for (const item of items) {
@@ -69,23 +118,92 @@ export function commonAssetIds(globalBlock) {
     return ids;
 }
 
+function emptyReferenceContainer() {
+    return { refs: [], refVideos: [], refAudios: [] };
+}
+
+export function ensureR2vReferenceAssetSchema(timeline, idFactory = defaultIdFactory) {
+    const data = timeline || {};
+    data.global = data.global || {};
+    data.segments = Array.isArray(data.segments) ? data.segments : [];
+    if ((!data.r2vCommon || typeof data.r2vCommon !== "object")
+        && data.r2v_common && typeof data.r2v_common === "object") {
+        data.r2vCommon = data.r2v_common;
+    }
+    delete data.r2v_common;
+    if (!data.r2vCommon || typeof data.r2vCommon !== "object") {
+        // Legacy R2V used global as Common. Only migrate when old R2V selection
+        // fields prove that these assets belonged to the old Common pool.
+        const legacyR2v = data.segments.some((segment) => (
+            Array.isArray(segment?.commonAssetIds)
+            || Array.isArray(segment?.common_asset_ids)
+            || segment?.useCommonPrompt != null
+            || segment?.use_common_prompt != null
+        ));
+        if (legacyR2v) {
+            data.r2vCommon = {
+                refs: data.global.refs || [],
+                refVideos: data.global.refVideos || data.global.ref_videos || [],
+                refAudios: data.global.refAudios || data.global.ref_audios || [],
+            };
+            data.global.refs = [];
+            data.global.refVideos = [];
+            data.global.refAudios = [];
+            delete data.global.ref_videos;
+            delete data.global.ref_audios;
+        } else {
+            data.r2vCommon = emptyReferenceContainer();
+        }
+    }
+    const used = new Set();
+    ensureIds(data.global, "global", idFactory, used);
+    ensureIds(data.r2vCommon, "r2v-common", idFactory, used);
+    delete data.global.ref_videos;
+    delete data.global.ref_audios;
+    delete data.r2vCommon.ref_videos;
+    delete data.r2vCommon.ref_audios;
+    const allCommon = referenceAssetIds(data.r2vCommon);
+    for (let index = 0; index < data.segments.length; index += 1) {
+        const segment = data.segments[index] || (data.segments[index] = {});
+        ensureIds(segment, `segment-${segment.id || index}`, idFactory, used);
+        const storedExclusions = Array.isArray(segment.excludedCommonAssetIds)
+            ? segment.excludedCommonAssetIds
+            : segment.excluded_common_asset_ids;
+        if (!Array.isArray(storedExclusions)) {
+            const legacySelection = Array.isArray(segment.commonAssetIds)
+                ? segment.commonAssetIds
+                : segment.common_asset_ids;
+            if (Array.isArray(legacySelection)) {
+                const selected = new Set(legacySelection.map(String));
+                segment.excludedCommonAssetIds = allCommon.filter((id) => !selected.has(id));
+            } else {
+                segment.excludedCommonAssetIds = [];
+            }
+        } else {
+            segment.excludedCommonAssetIds = [...new Set(storedExclusions.map(String))];
+        }
+        const storedUseCommon = segment.useCommonAssets ?? segment.use_common_assets;
+        segment.useCommonAssets = storedUseCommon == null ? true : !!storedUseCommon;
+        delete segment.commonAssetIds;
+        delete segment.common_asset_ids;
+        delete segment.excluded_common_asset_ids;
+        delete segment.useCommonPrompt;
+        delete segment.use_common_prompt;
+        delete segment.use_common_assets;
+    }
+    return data;
+}
+
 export function ensureReferenceAssetSchema(timeline, idFactory = defaultIdFactory) {
     const data = timeline || {};
     data.global = data.global || {};
     data.segments = Array.isArray(data.segments) ? data.segments : [];
     const used = new Set();
-    ensureIds(data.global, "common", idFactory, used);
-    const allCommon = commonAssetIds(data.global);
+    ensureIds(data.global, "global", idFactory, used);
+    if (data.r2vCommon) ensureIds(data.r2vCommon, "r2v-common", idFactory, used);
     for (let index = 0; index < data.segments.length; index += 1) {
         const segment = data.segments[index] || (data.segments[index] = {});
         ensureIds(segment, `segment-${segment.id || index}`, idFactory, used);
-        if (!Array.isArray(segment.commonAssetIds)) {
-            segment.commonAssetIds = [...allCommon];
-        } else {
-            segment.commonAssetIds = segment.commonAssetIds.map(String);
-        }
-        if (segment.useCommonPrompt == null) segment.useCommonPrompt = true;
-        else segment.useCommonPrompt = !!segment.useCommonPrompt;
     }
     return data;
 }
@@ -122,8 +240,10 @@ export function allKnownReferenceAssets(globalBlock, segment = null) {
 }
 
 export function effectiveReferenceAssets(globalBlock, segment) {
-    const selected = new Set((segment?.commonAssetIds || []).map(String));
-    const common = allKnownReferenceAssets(globalBlock).filter((x) => selected.has(x.assetId));
+    const excluded = new Set((segment?.excludedCommonAssetIds || []).map(String));
+    const common = segment?.useCommonAssets === false
+        ? []
+        : allKnownReferenceAssets(globalBlock).filter((x) => !excluded.has(x.assetId));
     const local = allKnownReferenceAssets({}, segment);
     const pictures = [...common, ...local].filter((x) => x.kind === "picture");
     const videos = [...common, ...local].filter((x) => x.kind === "video");
@@ -146,9 +266,35 @@ export function effectiveReferenceAssets(globalBlock, segment) {
     return [...pictures, ...videos, ...audios];
 }
 
+export function referenceAssetStates(commonBlock, segment) {
+    const active = effectiveReferenceAssets(commonBlock, segment);
+    const activeKeys = new Set(active.map((asset) => `${asset.kind}:${asset.assetId}`));
+    const known = allKnownReferenceAssets(commonBlock, segment);
+    for (const video of [...known].filter((asset) => (
+        asset.kind === "video" && (asset.item.pairedAudioFile || asset.item.paired_audio_file)
+    ))) {
+        known.push({
+            ...video,
+            kind: "audio",
+            paired: true,
+            label: `${video.label} soundtrack`,
+            officialTag: "",
+        });
+    }
+    const byKey = new Map(active.map((asset) => [`${asset.kind}:${asset.assetId}`, asset]));
+    for (const asset of known) {
+        const key = `${asset.kind}:${asset.assetId}`;
+        if (!byKey.has(key)) byKey.set(key, { ...asset, officialTag: "" });
+    }
+    return [...byKey.entries()].map(([key, asset]) => ({
+        ...asset,
+        status: activeKeys.has(key) ? "active" : "disabled",
+    }));
+}
+
 export function compileSemanticPrompt(prompt, effectiveAssets, options = {}) {
     const mapping = new Map(
-        (effectiveAssets || []).map((asset) => [
+        (effectiveAssets || []).filter((asset) => asset.status !== "disabled" && asset.officialTag).map((asset) => [
             `${asset.kind}:${asset.assetId}`,
             asset.officialTag,
         ]),

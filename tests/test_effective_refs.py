@@ -8,7 +8,6 @@ from _minimax_h3_motion_director_testpkg.director.effective_refs import (
     SemanticReferenceError,
     compile_effective_references,
     compile_semantic_prompt,
-    concat_common_prompt,
     semantic_reference_token,
 )
 
@@ -114,11 +113,3 @@ def test_semantic_prompt_fails_loud_when_common_asset_is_disabled():
             known_assets={("picture", "B"): 'Common Picture "B"'},
             segment_label="Segment 2",
         )
-
-
-def test_common_prompt_toggle_is_independent_of_common_asset_selection():
-    assert concat_common_prompt("COMMON", "LOCAL", use_common_prompt=True) == "COMMON\n\nLOCAL"
-    assert concat_common_prompt("COMMON", "LOCAL", use_common_prompt=False) == "LOCAL"
-    # Asset selection is not an input to prompt concatenation by design.
-    assert concat_common_prompt("COMMON", "", use_common_prompt=True) == "COMMON"
-    assert concat_common_prompt("COMMON", "", use_common_prompt=False) == ""

@@ -15,7 +15,7 @@
 - 在节点内编辑多段时间轴、分段提示词与参考素材。
 - 支持完整序列生成、勾选分段运行、全部导出和分段导出。
 - 支持模型内部采样，也支持外接标准 `SAMPLER` + `SIGMAS`。
-- R2V 提供可复用的 `Common Asset Pool`，每段再叠加自己的 Local 素材；不再隐式继承上一段素材。
+- R2V 提供默认收起的 `Common References` 独立面板，每段再叠加自己的 Local 素材；Common 不会复制进 Local，也不会泄漏到其他任务。
 - 提示词中的图片、视频、音频引用使用可视化 Prompt chip，素材勾选变化后会自动重新编号。
 - 使用 latent-first Motion Context 延续上一段生成的视频状态与模型生成音频，并保留像素缓存作为兼容 fallback。
 - 使用可选的 Color Re-anchor 降低长链生成中的累积性色彩漂移。
@@ -79,7 +79,7 @@ python\python.exe -m pip install -r ComfyUI\custom_nodes\ComfyUI-MiniMax-H3-Moti
 1. 连接 MiniMax H3 `MODEL`、video VAE、audio VAE 和 CLIP。
 2. 添加 `MiniMax H3 Motion Director`，选择任务模式。
 3. 在 Director 时间轴中建立一个或多个分段，并填写全局或分段提示词。
-4. R2V 可先把会重复使用的素材放进 `Common Asset Pool`，再为每段添加 Local 素材；其他任务按需要上传图片、源视频或参考音频。
+4. R2V 可展开 `Common References` 放入重复使用的素材，再为每段添加 Local 素材；每段提示词完全独立，没有 Common Prompt。
 5. 多段任务按需要选择 Motion Context 或 Source Bridge。
 6. 不连接外部 `SAMPLER`/`SIGMAS` 时使用内部采样；两者都连接时自动切换到外接采样。
 7. Queue 工作流。`images` 与 `audio` 可继续连接到视频保存节点。
@@ -146,7 +146,7 @@ python\python.exe -m pip install -r ComfyUI\custom_nodes\ComfyUI-MiniMax-H3-Moti
 
 ## R2V Common / Local 参考素材
 
-`Common Asset Pool` 用来保存会被多个 R2V 分段重复使用的 Picture、参考视频和参考音频。每个分段都有独立的 Common 勾选清单、`全选`、`全不选`、`使用 Common Prompt` 开关，以及自己的 Local 素材区。运行时会先读取该段勾选的 Common，再读取该段 Local，按 `Common → Local` 顺序压成没有空洞的官方槽位：`<Picture 1>`、`<Video 1>`、`<Audio 1>`……。
+`Common References`（Common Asset Pool）是 R2V 专用、默认收起且独立于分段列表的素材面板，只保存 Picture、参考视频和参考音频，不含 Common Prompt。每段都有自己的完整 Prompt、`使用公共素材` 开关、Common 排除清单与 Local 素材区。运行时会先读取该段启用且未排除的 Common，再读取 Local，按 `Common → Local` 顺序压成没有空洞的官方槽位：`<Picture 1>`、`<Video 1>`、`<Audio 1>`……。新加入的 Common 默认对所有仍启用 Common 的分段生效；整段关闭 Common 后，后来加入的素材也不会自动开启该段。
 
 例如 Common Pool 放入角色 A、B、C，Segment 1 的 Local 放入道具 D：
 
@@ -157,13 +157,13 @@ Segment 1 effective refs：A、B、C、D
 
 Segment 2 若取消全部 Common 且没有 Local，就是纯场景生成；它不会继承 Segment 1 的 A、B、C、D。Segment 3 若选择 A、B、C，并上传 Local E，则有效集合是 A、B、C、E。外接 R2V Group 也使用 Director 内同一份 Common Pool，但每个外接 segment 的 Local 素材仍来自自己的 Group 节点。
 
-Common Prompt 与 Common 素材选择互相独立：关闭 `使用 Common Prompt` 只是不拼接公共文字，不会取消已勾选素材。每个素材都有稳定 asset ID；工作流保存的是这个身份，不是当时的数字标签。因此取消 B 后，C 的可视标签可以从 `<Picture 3>` 变成 `<Picture 2>`，但 Prompt chip 仍然指向同一个 C。若提示词引用了已取消、已删除或不属于该段的素材，执行前会明确报错，不会静默指向另一张图。
+每个素材都有稳定 asset ID；替换同一槽位或移动素材会保留身份，只有删除后重新新增才产生新身份。因此取消 B 后，C 的可视标签可以从 `<Picture 3>` 变成 `<Picture 2>`，但 Prompt chip 仍然指向同一个 C。chip 会明确区分绿色 `ACTIVE`、橙红色 `DISABLED` 与红色 `MISSING`；执行前对 disabled/missing 引用分别报错，不会静默删除、改绑或指向另一份素材。
 
 参考视频自带的 soundtrack 会按官方 Ref2VA 顺序进入 Audio 槽位，再接独立参考音频。Picture、Video、Audio 的数量上限会在编译有效集合时检查，超过上限会在加载模型前报出具体分段与类型。
 
 ## Prompt chip 与素材引用
 
-在 R2V 提示词输入框键入 `@` 会打开当前分段的有效素材列表，只显示该段已选择的 Common 和 Local。选中后插入一个不可拆开的 Prompt chip；chip 显示当前官方标签，但内部保存稳定 asset ID，所以 Common 勾选改变后会自动重新编号。
+在 R2V 提示词输入框键入 `@` 会打开当前分段的有效素材列表，只显示该段启用的 Common 和 Local。选中后插入不可拆开的 Prompt chip；chip 显示当前官方标签，内部保存稳定 asset ID。切换分段会同步正确 Prompt，不会把前一段文字覆盖到后一段；在编辑器内使用 Backspace、Delete、Space、方向键、Home/End 或输入法时，也不会触发时间轴删除、播放或逐帧快捷键。
 
 - 方向键可移动候选项目，菜单会自动滚动到当前项。
 - Backspace/Delete 会一次删除整个 chip，不会把内部 token 切成残片，也不会触发节点删除快捷键。
@@ -182,7 +182,7 @@ Common Prompt 与 Common 素材选择互相独立：关闭 `使用 Common Prompt
 
 `i2v_groups` / `r2v_groups` 可以直接连接 Group 或 Groups Combine，也可以经过一层或多层标准 Reroute、名称包含 Reroute 的第三方节点（包括 rgthree Reroute），以及明确标记为 virtual 且只有一个已连接输入的前端直通节点。解析器最多追踪 16 层并检测循环；断链、循环或缺少上游节点会安全停止。
 
-普通语义处理节点即使只有一个输入也不会被当作 Reroute 穿透。未知上游 packer 仍按原规则保留空 segment 槽位，让运行选择和时间轴位置不会错位。External R2V 的 Local 素材来自 Group 节点，Common 选择与 Common Prompt 仍由 Director 时间轴统一管理。
+普通语义处理节点即使只有一个输入也不会被当作 Reroute 穿透。未知上游 packer 仍按原规则保留空 segment 槽位，让运行选择和时间轴位置不会错位。External R2V 的 Local 素材来自 Group 节点，Common 选择仍由 Director 的 `Common References` 统一管理；Prompt 始终属于各自分段。
 
 ### FL2V 仅尾帧
 

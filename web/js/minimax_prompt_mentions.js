@@ -21,8 +21,10 @@ import {
 } from "./minimax_reference_assets.mjs";
 import { t } from "./minimax_i18n.js";
 import {
+    createListenerRegistry,
     isPromptEditingKey,
     moveMentionActiveIndex,
+    promptValueNeedsRender,
     shouldCloseMentionForScroll,
 } from "./minimax_prompt_mentions_core.mjs";
 export {
@@ -36,7 +38,8 @@ const MENTION_STYLES = `
 .bd-prompt-editor{width:100%;min-height:64px;box-sizing:border-box;background:#141414;border:1px solid #333;border-radius:5px;color:#eee;padding:7px;white-space:pre-wrap;overflow-wrap:anywhere;font:11px/1.45 inherit;outline:none}
 .bd-prompt-editor:focus{border-color:#4d7b5b;box-shadow:0 0 0 1px rgba(79,255,143,.12)}
 .bd-prompt-chip{display:inline-flex;align-items:center;max-width:190px;margin:0 2px;padding:1px 6px;border:1px solid #45604d;border-radius:999px;background:#1a2b20;color:#8ff0aa;font-weight:700;white-space:nowrap;vertical-align:baseline;user-select:all}
-.bd-prompt-chip[data-missing="1"]{border-color:#8b4b4b;background:#301b1b;color:#ff9c9c}
+.bd-prompt-chip[data-state="disabled"]{border-color:#9a622e;background:#302318;color:#ffb66e}
+.bd-prompt-chip[data-state="missing"]{border-color:#8b4b4b;background:#301b1b;color:#ff9c9c}
 .bd-prompt-chip-picture:before{content:"▣";margin-right:4px}.bd-prompt-chip-video:before{content:"▶";margin-right:4px}.bd-prompt-chip-audio:before{content:"♪";margin-right:4px}
 .bd-mention-menu{position:fixed;z-index:10050;min-width:230px;max-width:340px;max-height:240px;overflow:auto;background:#252525;border:1px solid #444;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.45);padding:4px 0}
 .bd-mention-menu.hidden{display:none!important}.bd-mention-title{padding:6px 10px 4px;font-size:10px;color:#888;user-select:none}
@@ -100,6 +103,7 @@ export function mentionItemsFromMedia(media = {}) {
             token: semanticReferenceToken(asset.kind, asset.assetId),
             thumb: asset.kind === "picture" ? refThumbUrl(asset.item) : "",
             name: asset.label || "",
+            status: asset.status || "active",
         }));
     }
     return legacyMentionItems(media.refs, media.audios, media.videos);
@@ -164,7 +168,8 @@ function previousChipAtCaret(root) {
 
 /** Replace a textarea with a contenteditable semantic-chip editor. */
 export function wirePromptImageMentions(editor, textarea, getMedia) {
-    if (!textarea || textarea.dataset.mentionWired) return;
+    if (!textarea) return null;
+    if (textarea._mmxMentionController) return textarea._mmxMentionController;
     textarea.dataset.mentionWired = "1";
     injectStyles();
 
@@ -182,7 +187,12 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
     let activeIndex = 0;
     let filtered = [];
 
-    const mediaItems = () => mentionItemsFromMedia(typeof getMedia === "function" ? (getMedia() || {}) : {});
+    let destroyed = false;
+    let composing = false;
+    const listeners = createListenerRegistry();
+    const mediaItems = ({ activeOnly = false } = {}) => mentionItemsFromMedia(
+        typeof getMedia === "function" ? (getMedia() || {}) : {},
+    ).filter((item) => !activeOnly || item.status === "active");
     const mapping = () => new Map(mediaItems().map((item) => [item.token, item]));
 
     const makeChip = (token, item = null) => {
@@ -192,9 +202,20 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
         chip.className = `bd-prompt-chip bd-prompt-chip-${kind}`;
         chip.contentEditable = "false";
         chip.dataset.semanticToken = token;
-        chip.dataset.missing = item ? "0" : "1";
-        chip.textContent = item?.officialTag || item?.label || `<${kind} disabled>`;
-        chip.title = item?.name || (item ? item.officialTag : t("mention.disabledAsset"));
+        const state = item?.status || (item ? "active" : "missing");
+        chip.dataset.state = state;
+        chip.dataset.missing = state === "missing" ? "1" : "0";
+        const id = parsed?.[2] || "";
+        chip.textContent = state === "active"
+            ? (item?.officialTag || item?.label || id)
+            : state === "disabled"
+                ? t("mention.disabledLabel", { name: item?.name || item?.label || id })
+                : t("mention.missingLabel", { name: id });
+        chip.title = state === "active"
+            ? (item?.name || item?.officialTag || "")
+            : state === "disabled"
+                ? t("mention.disabledAsset")
+                : t("mention.missingAsset", { name: id });
         return chip;
     };
 
@@ -274,7 +295,7 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
 
     const renderMenu = (query) => {
         const m = ensureMenu();
-        const all = mediaItems();
+        const all = mediaItems({ activeOnly: true });
         const q = String(query || "").toLowerCase();
         filtered = all.filter((item) => !q || `${item.label} ${item.name}`.toLowerCase().includes(q));
         activeIndex = Math.min(activeIndex, Math.max(0, filtered.length - 1));
@@ -329,12 +350,27 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
         renderMenu(found.query);
     };
 
-    rich.addEventListener("input", () => {
+    const onRichInput = () => {
         syncTextarea();
-        openIfMention();
+        if (!composing) openIfMention();
+    };
+    const onCompositionStart = () => { composing = true; closeMenu(); };
+    const onCompositionEnd = () => { composing = false; syncTextarea(); };
+    const onPaste = () => queueMicrotask(() => {
+        if (destroyed || composing) return;
+        textarea.value = serializeRich(rich);
+        const before = textarea.value;
+        hydrateOfficialTags();
+        if (textarea.value !== before) {
+            renderRich();
+            textarea.dispatchEvent(new Event("input", { bubbles: true }));
+        }
     });
-    rich.addEventListener("click", openIfMention);
-    rich.addEventListener("keydown", (event) => {
+    const onRichKeydown = (event) => {
+        if (event.isComposing || composing) {
+            event.stopPropagation();
+            return;
+        }
         if (isPromptEditingKey(event.key)) {
             // Never bubble to Director's segment/group delete shortcuts.
             event.stopPropagation();
@@ -360,29 +396,78 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
             event.preventDefault();
             closeMenu();
         }
-    });
+    };
+    listeners.add(rich, "input", onRichInput);
+    listeners.add(rich, "click", openIfMention);
+    listeners.add(rich, "keydown", onRichKeydown);
+    listeners.add(rich, "compositionstart", onCompositionStart);
+    listeners.add(rich, "compositionend", onCompositionEnd);
+    listeners.add(rich, "paste", onPaste);
 
-    document.addEventListener("mousedown", (event) => {
+    const onDocumentMouseDown = (event) => {
         if (!menu || menu.classList.contains("hidden")) return;
         if (event.target === rich || rich.contains(event.target) || menu.contains(event.target)) return;
         closeMenu();
-    });
-    window.addEventListener("scroll", (event) => {
+    };
+    const onWindowScroll = (event) => {
         if (shouldCloseMentionForScroll(menu, event.target)) closeMenu();
-    }, true);
-    window.addEventListener("resize", closeMenu);
+    };
+    listeners.add(document, "mousedown", onDocumentMouseDown);
+    listeners.add(window, "scroll", onWindowScroll, true);
+    listeners.add(window, "resize", closeMenu);
+
+    const controller = {
+        rich,
+        textarea,
+        getValue() {
+            if (!destroyed) textarea.value = serializeRich(rich);
+            return String(textarea.value || "");
+        },
+        setValue(value) {
+            if (destroyed) return;
+            const next = String(value || "");
+            if (!promptValueNeedsRender(textarea.value, serializeRich(rich), next)) return;
+            textarea.value = next;
+            hydrateOfficialTags();
+            renderRich();
+        },
+        refresh() {
+            if (destroyed || composing) return;
+            const value = serializeRich(rich);
+            textarea.value = value;
+            renderRich();
+        },
+        destroy() {
+            if (destroyed) return;
+            destroyed = true;
+            closeMenu();
+            listeners.destroy();
+            menu?.remove();
+            menu = null;
+            rich.remove();
+            textarea.style.display = "";
+            delete textarea.dataset.mentionWired;
+            delete textarea._mmxMentionController;
+        },
+    };
+    textarea._mmxMentionController = controller;
+    return controller;
 }
 
 /** Legacy/global editors keep direct official-tag behavior outside R2V Common cards. */
 export function mountPromptImageMentions(editor) {
-    if (!editor) return;
-    wirePromptImageMentions(editor, editor.globalPrompt, () => ({
+    if (!editor) return [];
+    const controllers = [];
+    const globalController = wirePromptImageMentions(editor, editor.globalPrompt, () => ({
         refs: editor.timeline?.global?.refs || [],
         audios: editor.timeline?.global?.refAudios || [],
         videos: editor.timeline?.global?.refVideos || [],
     }));
-    wirePromptImageMentions(editor, editor.segPrompt, () => {
+    if (globalController) controllers.push(globalController);
+    const segmentController = wirePromptImageMentions(editor, editor.segPrompt, () => {
         const seg = editor.timeline?.segments?.[editor.selectedIndex];
         return { refs: seg?.refs || [], audios: seg?.refAudios || [], videos: seg?.refVideos || [] };
     });
+    if (segmentController) controllers.push(segmentController);
+    return controllers;
 }
