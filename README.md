@@ -352,18 +352,6 @@ ComfyUI/output/minimax_motion_context_cache
 - 当前测试环境的部分 Turbo/pruned 模型组合可能与附加 Motion/Audio conditioning 不兼容。
 - FL2V 仅尾帧、Common/Local 多素材重编号和 latent-first handoff 已有自动测试，但仍需用户使用自己的模型与素材做真实 GPU 质量验收。
 
-## 开发与验证
-
-在仓库根目录运行：
-
-```bash
-python -m compileall -q __init__.py director lib nodes patches
-python -m pytest -q
-node --test tests_js/*.test.mjs
-```
-
-真实 GPU 验收至少应分别检查：R2V Common A、B、C + Local D/E 的分段组合、纯场景空素材段、Prompt chip 重编号、I2V/R2V latent-first MC、Color Re-anchor 像素 fallback、FL2V 仅尾帧、V2V/RV2V Source Bridge，以及 External Groups 经一层/多层 Reroute。重点确认所有 H3 画布为 32-safe、有效素材顺序与报告一致，并且导出帧数与音频时长不变。
-
 ## 许可证与上游来源
 
 本项目整体以 [GNU General Public License version 3](LICENSE) 发布。
