@@ -53,8 +53,8 @@ from .motion_context import (
 )
 from .latent_context_cache import (
     LATENT_HANDOFF_PIPELINE,
-    av_latent_to_cpu,
     load_latent_context_cache,
+    prepare_latent_context_tail,
     save_latent_context_cache,
 )
 from .audio_export import (
@@ -352,12 +352,11 @@ def execute_director_plan_core(
             )
 
     cache_settings: dict[str, Any] = {
-        "pipeline": "exported_motion_context_v1",
+        "pipeline": "exported_motion_context_tail_v2",
         "seed": int(seed),
         "cfg": float(cfg),
         "sampling_mode": sampling_mode,
         "motion_context_enabled": motion_enabled,
-        "context_length": requested_context,
         "audio_context_enabled": audio_context_active,
         "audio_mode": audio_mode,
         "model_class": type(getattr(model, "model", None)).__name__,
@@ -961,7 +960,13 @@ def execute_director_plan_core(
             "export_frames": int(target_len),
             "sample_frames": int(num_frames),
         }
-        sampled_context_latent = av_latent_to_cpu(samples)
+        sampled_context_latent = None
+        cached_handoff = None
+        if motion_enabled:
+            sampled_context_latent, cached_handoff = prepare_latent_context_tail(
+                samples,
+                handoff,
+            )
         if audio_has_samples(audio_dict):
             audio_dict = {
                 "waveform": audio_dict["waveform"].detach().cpu(),
@@ -986,7 +991,7 @@ def execute_director_plan_core(
                 seg,
                 plan,
                 latent=sampled_context_latent,
-                handoff=handoff,
+                handoff=cached_handoff,
                 settings=cache_settings,
             ):
                 reports.append(
@@ -1005,7 +1010,7 @@ def execute_director_plan_core(
                 "segment_index": int(seg.index),
             },
             latent=sampled_context_latent,
-            handoff=handoff,
+            handoff=cached_handoff,
         )
 
         if (

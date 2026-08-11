@@ -16,9 +16,10 @@ from .segment_cache import _write_via_temp
 
 log = logging.getLogger("ComfyUI-MiniMax-H3-Motion-Director.latent_context_cache")
 
-LATENT_CACHE_VERSION = 1
-LATENT_CACHE_FORMAT = "minimax_h3_motion_director_av_latent_handoff_v1"
-LATENT_HANDOFF_PIPELINE = "motion_context_latent_handoff_v1"
+LATENT_CACHE_VERSION = 2
+LATENT_CACHE_FORMAT = "minimax_h3_motion_director_av_latent_tail_v2"
+LATENT_HANDOFF_PIPELINE = "motion_context_latent_tail_v2"
+MAX_PERSISTED_CONTEXT_FRAMES = 39
 
 
 @dataclass(frozen=True)
@@ -67,6 +68,81 @@ def av_latent_to_cpu(latent: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def _sample_streams(latent: dict[str, Any]) -> list[Any]:
+    samples = latent.get("samples") if isinstance(latent, dict) else None
+    if hasattr(samples, "unbind"):
+        return list(samples.unbind())
+    if isinstance(samples, (tuple, list)):
+        return list(samples)
+    if isinstance(samples, torch.Tensor):
+        return [samples]
+    return []
+
+
+def prepare_latent_context_tail(
+    latent: dict[str, Any],
+    handoff: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, int]]:
+    """Keep only the largest reusable H3 AV-latent endpoint window.
+
+    The returned handoff uses a local 0..span timeline.  Original coordinates
+    remain diagnostic metadata and are never needed to consume the tail.
+    """
+    required = {"context_end_frame", "trim_frames", "export_frames", "sample_frames"}
+    if not isinstance(handoff, dict) or not required.issubset(handoff):
+        raise ValueError("AV latent handoff metadata is incomplete.")
+
+    from .motion_context import (
+        _audio_context_from_latent,
+        select_context_span,
+        video_context_from_latent,
+    )
+
+    original = {
+        key: int(handoff.get("original_" + key, handoff[key]))
+        for key in required
+    }
+    stored_tail_frames = select_context_span(
+        MAX_PERSISTED_CONTEXT_FRAMES,
+        int(handoff["export_frames"]),
+    )
+    blocks, _offsets, selected_end = video_context_from_latent(
+        latent,
+        span=stored_tail_frames,
+        context_end_frame=int(handoff["context_end_frame"]),
+    )
+    video_tail = torch.cat(blocks, dim=2).detach().cpu().contiguous()
+    streams: list[torch.Tensor] = [video_tail]
+    if len(_sample_streams(latent)) >= 2:
+        audio_ref, _audio_steps = _audio_context_from_latent(
+            latent,
+            span=stored_tail_frames,
+            context_end_frame=selected_end,
+        )
+        streams.append(audio_ref["audio_latent"].detach().cpu().contiguous())
+
+    tail_latent: dict[str, Any] = {"samples": tuple(streams)}
+    for key, value in latent.items():
+        if key != "samples" and not isinstance(value, torch.Tensor):
+            tail_latent[key] = value
+
+    tail_handoff = {
+        "context_end_frame": stored_tail_frames,
+        "trim_frames": 0,
+        "export_frames": stored_tail_frames,
+        "sample_frames": stored_tail_frames,
+        "stored_tail_frames": stored_tail_frames,
+        "original_context_end_frame": original["context_end_frame"],
+        "original_trim_frames": original["trim_frames"],
+        "original_export_frames": original["export_frames"],
+        "original_sample_frames": original["sample_frames"],
+        "selected_source_end_frame": int(
+            handoff.get("selected_source_end_frame", selected_end)
+        ),
+    }
+    return tail_latent, tail_handoff
+
+
 def _settings(settings: dict[str, Any]) -> dict[str, Any]:
     return {**dict(settings or {}), "latent_handoff_pipeline": LATENT_HANDOFF_PIPELINE}
 
@@ -85,21 +161,21 @@ def save_latent_context_cache(
         return False
     try:
         slot = int(getattr(seg, "timeline_index", seg.index))
-        required = {"context_end_frame", "trim_frames", "export_frames", "sample_frames"}
-        if not required.issubset(handoff):
-            raise ValueError("AV latent handoff metadata is incomplete.")
+        tail_latent, tail_handoff = prepare_latent_context_tail(latent, handoff)
         metadata = {
             "pipeline": LATENT_HANDOFF_PIPELINE,
             "segment_index": slot,
             "fps": float(plan.frame_rate),
+            "stored_tail_frames": int(tail_handoff["stored_tail_frames"]),
+            "original_export_frames": int(tail_handoff["original_export_frames"]),
             "fingerprint": context_fingerprint(seg, plan, _settings(settings)),
         }
         payload = {
             "format": LATENT_CACHE_FORMAT,
             "version": LATENT_CACHE_VERSION,
             "metadata": metadata,
-            "handoff": {key: int(handoff[key]) for key in required},
-            "latent": av_latent_to_cpu(latent),
+            "handoff": tail_handoff,
+            "latent": tail_latent,
         }
         destination = root / ("seg_%04d.av.pt" % slot)
         _write_via_temp(destination, lambda path: torch.save(payload, path))
@@ -150,10 +226,48 @@ def load_latent_context_cache(
             return None
         if not isinstance(latent, dict) or "samples" not in latent:
             return None
-        required = {"context_end_frame", "trim_frames", "export_frames", "sample_frames"}
+        required = {
+            "context_end_frame",
+            "trim_frames",
+            "export_frames",
+            "sample_frames",
+            "stored_tail_frames",
+            "original_context_end_frame",
+            "original_trim_frames",
+            "original_export_frames",
+            "original_sample_frames",
+            "selected_source_end_frame",
+        }
         if not required.issubset(handoff):
             return None
-        return CachedLatentContext(latent=latent, handoff=handoff, metadata=metadata)
+        clean_handoff = {key: int(handoff[key]) for key in required}
+        stored = clean_handoff["stored_tail_frames"]
+        if stored not in {1, 5, 22, 39}:
+            return None
+        if not (
+            clean_handoff["context_end_frame"] == stored
+            and clean_handoff["export_frames"] == stored
+            and clean_handoff["sample_frames"] == stored
+            and clean_handoff["trim_frames"] == 0
+            and clean_handoff["original_export_frames"] >= stored
+            and int(metadata.get("stored_tail_frames", -1)) == stored
+            and int(metadata.get("original_export_frames", -1))
+            == clean_handoff["original_export_frames"]
+        ):
+            return None
+        # Reject structurally valid metadata wrapped around an incomplete tail.
+        from .motion_context import video_context_from_latent
+
+        video_context_from_latent(
+            latent,
+            span=stored,
+            context_end_frame=clean_handoff["context_end_frame"],
+        )
+        return CachedLatentContext(
+            latent=latent,
+            handoff=clean_handoff,
+            metadata=metadata,
+        )
     except Exception as exc:
         log.warning("Motion Context AV latent cache read failed: %s", exc)
         return None
@@ -164,7 +278,9 @@ __all__ = [
     "LATENT_CACHE_FORMAT",
     "LATENT_CACHE_VERSION",
     "LATENT_HANDOFF_PIPELINE",
+    "MAX_PERSISTED_CONTEXT_FRAMES",
     "av_latent_to_cpu",
     "load_latent_context_cache",
+    "prepare_latent_context_tail",
     "save_latent_context_cache",
 ]

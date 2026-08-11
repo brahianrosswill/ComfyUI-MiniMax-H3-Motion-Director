@@ -19,8 +19,9 @@ from .segment_cache import _write_via_temp
 
 log = logging.getLogger("ComfyUI-MiniMax-H3-Motion-Director.context_cache")
 
-CACHE_VERSION = 1
-CACHE_FORMAT = "minimax_h3_motion_director_exported_context_v1"
+CACHE_VERSION = 2
+CACHE_FORMAT = "minimax_h3_motion_director_exported_context_tail_v2"
+MAX_PERSISTED_CONTEXT_FRAMES = 39
 
 
 class MotionContextCacheError(RuntimeError):
@@ -140,6 +141,11 @@ def _timeline_identity(plan) -> dict[str, Any]:
 
 
 def context_fingerprint(seg, plan, settings: dict[str, Any]) -> dict[str, Any]:
+    # The selectable context span is a consumer-side choice.  A segment's
+    # persisted endpoint can serve every supported 1/5/22/39-frame request, so
+    # changing that choice must not invalidate the producer result.
+    producer_settings = dict(settings or {})
+    producer_settings.pop("context_length", None)
     timeline = _timeline_identity(plan)
     slot = int(getattr(seg, "timeline_index", seg.index))
     segment_data = next(
@@ -158,8 +164,8 @@ def context_fingerprint(seg, plan, settings: dict[str, Any]) -> dict[str, Any]:
         "timeline": timeline,
         "segment_index": slot,
         "segment_identity": _sha_json(segment_data),
-        "settings": settings,
-        "settings_sha256": _sha_json(settings),
+        "settings": producer_settings,
+        "settings_sha256": _sha_json(producer_settings),
     }
 
 
@@ -187,16 +193,24 @@ def save_motion_context_cache(
     audio: dict[str, Any] | None,
     settings: dict[str, Any],
 ) -> bool:
-    """Persist only exported CPU frames/audio. Returns False on I/O failure."""
+    """Persist only the final, reusable exported RGB/audio endpoint tail."""
     try:
+        if not isinstance(frames, torch.Tensor) or frames.ndim != 4:
+            raise ValueError("exported frames must be an NHWC tensor")
+        original_export_frames = int(frames.shape[0])
+        if original_export_frames <= 0:
+            raise ValueError("exported frames are empty")
+        stored_tail_frames = min(MAX_PERSISTED_CONTEXT_FRAMES, original_export_frames)
+        frames_tail = frames[-stored_tail_frames:].detach().cpu().float().contiguous()
         root = _cache_root(node_id)
         slot = int(getattr(seg, "timeline_index", seg.index))
         dest = root / ("seg_%04d.pt" % slot)
         metadata = {
             "fps": float(plan.frame_rate),
-            "frame_count": int(frames.shape[0]),
-            "width": int(frames.shape[2]),
-            "height": int(frames.shape[1]),
+            "stored_tail_frames": stored_tail_frames,
+            "original_export_frames": original_export_frames,
+            "width": int(frames_tail.shape[2]),
+            "height": int(frames_tail.shape[1]),
             "segment_index": slot,
             "fingerprint": context_fingerprint(seg, plan, settings),
         }
@@ -204,11 +218,22 @@ def save_motion_context_cache(
             "format": CACHE_FORMAT,
             "version": CACHE_VERSION,
             "metadata": metadata,
-            "frames": frames.detach().cpu().float().contiguous(),
+            "frames": frames_tail,
         }
         if audio_has_samples(audio):
-            payload["audio_waveform"] = audio["waveform"].detach().cpu().contiguous()
-            payload["audio_sample_rate"] = int(audio["sample_rate"])
+            sample_rate = int(audio["sample_rate"])
+            waveform = audio["waveform"]
+            wanted_samples = max(
+                1,
+                int(round(stored_tail_frames / float(plan.frame_rate) * sample_rate)),
+            )
+            stored_audio_samples = min(int(waveform.shape[-1]), wanted_samples)
+            if stored_audio_samples > 0:
+                payload["audio_waveform"] = (
+                    waveform[..., -stored_audio_samples:].detach().cpu().contiguous()
+                )
+                payload["audio_sample_rate"] = sample_rate
+                metadata["stored_audio_samples"] = stored_audio_samples
         _write_via_temp(dest, lambda path: torch.save(payload, path))
         return True
     except Exception as exc:
@@ -259,7 +284,7 @@ def load_motion_context_cache(
         if not isinstance(frames, torch.Tensor) or frames.ndim != 4 or int(frames.shape[0]) <= 0:
             raise _cache_error(slot, "exported frame tensor is corrupt")
         checks = {
-            "frame_count": int(frames.shape[0]),
+            "stored_tail_frames": int(frames.shape[0]),
             "width": int(frames.shape[2]),
             "height": int(frames.shape[1]),
             "segment_index": slot,
@@ -267,6 +292,12 @@ def load_motion_context_cache(
         for key, value in checks.items():
             if int(metadata.get(key, -1)) != value:
                 raise _cache_error(slot, "%s does not match cached data" % key)
+        stored_tail_frames = int(metadata.get("stored_tail_frames", -1))
+        original_export_frames = int(metadata.get("original_export_frames", -1))
+        if not (1 <= stored_tail_frames <= MAX_PERSISTED_CONTEXT_FRAMES):
+            raise _cache_error(slot, "stored tail length is outside the supported range")
+        if original_export_frames < stored_tail_frames:
+            raise _cache_error(slot, "original export length is inconsistent")
         if abs(float(metadata.get("fps", 0.0)) - float(plan.frame_rate)) > 1e-9:
             raise _cache_error(slot, "FPS changed")
         audio = None
@@ -275,6 +306,8 @@ def load_motion_context_cache(
             sr = int(payload.get("audio_sample_rate") or 0)
             if wave.ndim != 3 or sr <= 0:
                 raise _cache_error(slot, "cached audio is corrupt")
+            if int(metadata.get("stored_audio_samples", -1)) != int(wave.shape[-1]):
+                raise _cache_error(slot, "stored audio length does not match cached data")
             audio = {"waveform": wave, "sample_rate": sr}
         return CachedMotionContext(frames=frames.float(), audio=audio, metadata=metadata)
     except MotionContextCacheError:
@@ -291,6 +324,7 @@ def load_motion_context_cache(
 
 __all__ = [
     "CACHE_VERSION",
+    "MAX_PERSISTED_CONTEXT_FRAMES",
     "CachedMotionContext",
     "MotionContextCacheError",
     "context_fingerprint",
