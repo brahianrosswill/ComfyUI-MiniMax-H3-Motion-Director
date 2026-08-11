@@ -16,6 +16,7 @@ import {
     refVideoPromptTag,
 } from "./minimax_gen_timeline.js";
 import {
+    hydrateOfficialReferenceTags,
     SEMANTIC_REFERENCE_RE,
     semanticReferenceToken,
 } from "./minimax_reference_assets.mjs";
@@ -25,6 +26,7 @@ import {
     isPromptEditingKey,
     moveMentionActiveIndex,
     promptValueNeedsRender,
+    referenceChipPresentation,
     shouldCloseMentionForScroll,
 } from "./minimax_prompt_mentions_core.mjs";
 export {
@@ -98,8 +100,10 @@ export function mentionItemsFromMedia(media = {}) {
         return media.assets.map((asset) => ({
             kind: asset.kind,
             assetId: asset.assetId,
-            label: asset.officialTag,
-            officialTag: asset.officialTag,
+            label: asset.effectiveTag || asset.authoringTag,
+            authoringTag: asset.authoringTag || "",
+            effectiveTag: asset.effectiveTag || asset.officialTag || "",
+            officialTag: asset.effectiveTag || asset.officialTag || "",
             token: semanticReferenceToken(asset.kind, asset.assetId),
             thumb: asset.kind === "picture" ? refThumbUrl(asset.item) : "",
             name: asset.label || "",
@@ -202,20 +206,24 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
         chip.className = `bd-prompt-chip bd-prompt-chip-${kind}`;
         chip.contentEditable = "false";
         chip.dataset.semanticToken = token;
-        const state = item?.status || (item ? "active" : "missing");
-        chip.dataset.state = state;
-        chip.dataset.missing = state === "missing" ? "1" : "0";
         const id = parsed?.[2] || "";
-        chip.textContent = state === "active"
-            ? (item?.officialTag || item?.label || id)
-            : state === "disabled"
-                ? t("mention.disabledLabel", { name: item?.name || item?.label || id })
-                : t("mention.missingLabel", { name: id });
-        chip.title = state === "active"
-            ? (item?.name || item?.officialTag || "")
-            : state === "disabled"
-                ? t("mention.disabledAsset")
-                : t("mention.missingAsset", { name: id });
+        const presentation = referenceChipPresentation(item || {
+            assetId: id,
+            status: "missing",
+            name: id,
+        }, {
+            formatDisabled: (name) => t("mention.disabledLabel", { name }),
+            formatMissing: (name) => t("mention.missingLabel", { name }),
+            formatDisabledTitle: (authoringTag, name) => [
+                t("mention.disabledAsset"),
+                authoringTag ? `${authoringTag} · ${name}` : "",
+            ].filter(Boolean).join("\n"),
+            formatMissingTitle: (name) => t("mention.missingAsset", { name }),
+        });
+        chip.dataset.state = presentation.state;
+        chip.dataset.missing = presentation.state === "missing" ? "1" : "0";
+        chip.textContent = presentation.text;
+        chip.title = presentation.title;
         return chip;
     };
 
@@ -237,19 +245,20 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
 
     // Bind pasted/typed official tags to the asset that currently owns the tag.
     const hydrateOfficialTags = () => {
-        let value = String(textarea.value || "");
-        for (const item of mediaItems()) {
-            if (!item.assetId || !item.officialTag) continue;
-            value = value.split(item.officialTag).join(item.token);
-        }
-        textarea.value = value;
+        const before = String(textarea.value || "");
+        textarea.value = hydrateOfficialReferenceTags(before, mediaItems());
+        return textarea.value !== before;
     };
-    hydrateOfficialTags();
+    const initiallyHydrated = hydrateOfficialTags();
     renderRich();
+    if (initiallyHydrated) textarea.dispatchEvent(new Event("input", { bubbles: true }));
 
-    const syncTextarea = () => {
+    const syncTextarea = ({ hydrate = false } = {}) => {
         textarea.value = serializeRich(rich);
+        const hydrated = hydrate ? hydrateOfficialTags() : false;
+        if (hydrated) renderRich();
         textarea.dispatchEvent(new Event("input", { bubbles: true }));
+        return hydrated;
     };
 
     const ensureMenu = () => {
@@ -351,20 +360,14 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
     };
 
     const onRichInput = () => {
-        syncTextarea();
-        if (!composing) openIfMention();
+        const hydrated = syncTextarea({ hydrate: true });
+        if (!composing && !hydrated) openIfMention();
     };
     const onCompositionStart = () => { composing = true; closeMenu(); };
-    const onCompositionEnd = () => { composing = false; syncTextarea(); };
+    const onCompositionEnd = () => { composing = false; syncTextarea({ hydrate: true }); };
     const onPaste = () => queueMicrotask(() => {
         if (destroyed || composing) return;
-        textarea.value = serializeRich(rich);
-        const before = textarea.value;
-        hydrateOfficialTags();
-        if (textarea.value !== before) {
-            renderRich();
-            textarea.dispatchEvent(new Event("input", { bubbles: true }));
-        }
+        syncTextarea({ hydrate: true });
     });
     const onRichKeydown = (event) => {
         if (event.isComposing || composing) {
@@ -428,8 +431,9 @@ export function wirePromptImageMentions(editor, textarea, getMedia) {
             const next = String(value || "");
             if (!promptValueNeedsRender(textarea.value, serializeRich(rich), next)) return;
             textarea.value = next;
-            hydrateOfficialTags();
+            const hydrated = hydrateOfficialTags();
             renderRich();
+            if (hydrated) textarea.dispatchEvent(new Event("input", { bubbles: true }));
         },
         refresh() {
             if (destroyed || composing) return;

@@ -9,6 +9,7 @@ import {
     mentionQueryFromText,
     moveMentionActiveIndex,
     promptValueNeedsRender,
+    referenceChipPresentation,
     shouldHandleTimelineShortcut,
     shouldCloseMentionForScroll,
 } from "../web/js/minimax_prompt_mentions_core.mjs";
@@ -47,6 +48,46 @@ test("AAA/BBB segment switching refreshes stale rich prompt without rebuilding s
     assert.equal(promptValueNeedsRender("BBB", "AAA", "BBB"), true);
     assert.equal(promptValueNeedsRender("AAA edited", "AAA edited", "AAA edited"), false);
     assert.equal(promptValueNeedsRender("AAA edited", "AAA edited", "BBB"), true);
+});
+
+test("reference chip presentation uses effective tag without changing semantic identity", () => {
+    const formatters = {
+        formatDisabled: (name) => `已关闭 · ${name}`,
+        formatMissing: (name) => `素材不存在 · ${name}`,
+        formatDisabledTitle: (authoringTag, name) => `原始引用 ${authoringTag}\n素材：${name}`,
+        formatMissingTitle: (name) => `找不到素材：${name}`,
+    };
+    assert.deepEqual(referenceChipPresentation({
+        assetId: "C",
+        status: "active",
+        authoringTag: "<Picture 3>",
+        effectiveTag: "<Picture 1>",
+        name: "C.png",
+    }, formatters), {
+        state: "active",
+        text: "<Picture 1>",
+        title: "C.png",
+    });
+    assert.deepEqual(referenceChipPresentation({
+        assetId: "C",
+        status: "disabled",
+        authoringTag: "<Picture 3>",
+        effectiveTag: "",
+        name: "C.png",
+    }, formatters), {
+        state: "disabled",
+        text: "已关闭 · C.png",
+        title: "原始引用 <Picture 3>\n素材：C.png",
+    });
+    assert.deepEqual(referenceChipPresentation({
+        assetId: "gone",
+        status: "missing",
+        name: "gone",
+    }, formatters), {
+        state: "missing",
+        text: "素材不存在 · gone",
+        title: "找不到素材：gone",
+    });
 });
 
 test("scrolling inside the mention menu does not close it", () => {

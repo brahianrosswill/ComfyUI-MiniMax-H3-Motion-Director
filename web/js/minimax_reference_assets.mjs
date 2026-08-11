@@ -221,22 +221,72 @@ function assetDescriptor(kind, item, source) {
         source,
         item,
         label: String(item.name || item.label || path.split(/[\\/]/).pop() || assetId),
+        authoringTag: "",
+        effectiveTag: "",
         officialTag: "",
         paired: false,
     };
 }
 
+function orderedMediaItems(items) {
+    return [...(items || [])]
+        .map((item, position) => ({ item, position }))
+        .sort((left, right) => {
+            const leftSlot = Number(left.item?.index ?? left.item?.slot ?? left.position);
+            const rightSlot = Number(right.item?.index ?? right.item?.slot ?? right.position);
+            return leftSlot - rightSlot || left.position - right.position;
+        })
+        .map(({ item }) => item);
+}
+
 export function allKnownReferenceAssets(globalBlock, segment = null) {
     const out = [];
     for (const [kind, items] of arraysFor(globalBlock)) {
-        for (const item of items) if (hasMedia(kind, item)) out.push(assetDescriptor(kind, item, "common"));
+        for (const item of orderedMediaItems(items)) {
+            if (hasMedia(kind, item)) out.push(assetDescriptor(kind, item, "common"));
+        }
     }
     if (segment) {
         for (const [kind, items] of arraysFor(segment)) {
-            for (const item of items) if (hasMedia(kind, item)) out.push(assetDescriptor(kind, item, "local"));
+            for (const item of orderedMediaItems(items)) {
+                if (hasMedia(kind, item)) out.push(assetDescriptor(kind, item, "local"));
+            }
         }
     }
     return out;
+}
+
+function assignReferenceTags(items, kind, field) {
+    items.forEach((item, index) => { item[field] = `<${kind} ${index + 1}>`; });
+}
+
+function pairedAudioAssets(videos) {
+    return videos
+        .filter((asset) => !!(asset.item.pairedAudioFile || asset.item.paired_audio_file))
+        .map((asset) => ({
+            ...asset,
+            kind: "audio",
+            paired: true,
+            label: `${asset.label} soundtrack`,
+            authoringTag: "",
+            effectiveTag: "",
+            officialTag: "",
+        }));
+}
+
+export function authoringReferenceAssets(commonBlock, segment) {
+    const all = [
+        ...allKnownReferenceAssets(commonBlock),
+        ...allKnownReferenceAssets({}, segment),
+    ];
+    const pictures = all.filter((asset) => asset.kind === "picture");
+    const videos = all.filter((asset) => asset.kind === "video");
+    const standaloneAudios = all.filter((asset) => asset.kind === "audio");
+    const audios = [...pairedAudioAssets(videos), ...standaloneAudios];
+    assignReferenceTags(pictures, "Picture", "authoringTag");
+    assignReferenceTags(videos, "Video", "authoringTag");
+    assignReferenceTags(audios, "Audio", "authoringTag");
+    return [...pictures, ...videos, ...audios];
 }
 
 export function effectiveReferenceAssets(globalBlock, segment) {
@@ -249,55 +299,54 @@ export function effectiveReferenceAssets(globalBlock, segment) {
     const videos = [...common, ...local].filter((x) => x.kind === "video");
     const standaloneAudios = [...common, ...local].filter((x) => x.kind === "audio");
 
-    pictures.forEach((item, index) => { item.officialTag = `<Picture ${index + 1}>`; });
-    videos.forEach((item, index) => { item.officialTag = `<Video ${index + 1}>`; });
+    assignReferenceTags(pictures, "Picture", "effectiveTag");
+    assignReferenceTags(videos, "Video", "effectiveTag");
 
-    const pairedAudios = videos
-        .filter((asset) => !!(asset.item.pairedAudioFile || asset.item.paired_audio_file))
-        .map((asset) => ({
-            ...asset,
-            kind: "audio",
-            paired: true,
-            label: `${asset.label} soundtrack`,
-            officialTag: "",
-        }));
+    const pairedAudios = pairedAudioAssets(videos);
     const audios = [...pairedAudios, ...standaloneAudios];
-    audios.forEach((item, index) => { item.officialTag = `<Audio ${index + 1}>`; });
+    assignReferenceTags(audios, "Audio", "effectiveTag");
+    for (const asset of [...pictures, ...videos, ...audios]) {
+        asset.officialTag = asset.effectiveTag;
+    }
     return [...pictures, ...videos, ...audios];
 }
 
 export function referenceAssetStates(commonBlock, segment) {
-    const active = effectiveReferenceAssets(commonBlock, segment);
-    const activeKeys = new Set(active.map((asset) => `${asset.kind}:${asset.assetId}`));
-    const known = allKnownReferenceAssets(commonBlock, segment);
-    for (const video of [...known].filter((asset) => (
-        asset.kind === "video" && (asset.item.pairedAudioFile || asset.item.paired_audio_file)
-    ))) {
-        known.push({
-            ...video,
-            kind: "audio",
-            paired: true,
-            label: `${video.label} soundtrack`,
-            officialTag: "",
-        });
+    const authoring = authoringReferenceAssets(commonBlock, segment);
+    const effectiveByKey = new Map(
+        effectiveReferenceAssets(commonBlock, segment)
+            .map((asset) => [`${asset.kind}:${asset.assetId}`, asset]),
+    );
+    return authoring.map((asset) => {
+        const effective = effectiveByKey.get(`${asset.kind}:${asset.assetId}`);
+        const effectiveTag = effective?.effectiveTag || "";
+        return {
+            ...asset,
+            effectiveTag,
+            officialTag: effectiveTag,
+            status: effective ? "active" : "disabled",
+        };
+    });
+}
+
+export function hydrateOfficialReferenceTags(prompt, authoringAssets) {
+    let value = String(prompt || "");
+    for (const asset of authoringAssets || []) {
+        if (!asset?.assetId || !asset?.authoringTag) continue;
+        value = value.split(asset.authoringTag)
+            .join(semanticReferenceToken(asset.kind, asset.assetId));
     }
-    const byKey = new Map(active.map((asset) => [`${asset.kind}:${asset.assetId}`, asset]));
-    for (const asset of known) {
-        const key = `${asset.kind}:${asset.assetId}`;
-        if (!byKey.has(key)) byKey.set(key, { ...asset, officialTag: "" });
-    }
-    return [...byKey.entries()].map(([key, asset]) => ({
-        ...asset,
-        status: activeKeys.has(key) ? "active" : "disabled",
-    }));
+    return value;
 }
 
 export function compileSemanticPrompt(prompt, effectiveAssets, options = {}) {
     const mapping = new Map(
-        (effectiveAssets || []).filter((asset) => asset.status !== "disabled" && asset.officialTag).map((asset) => [
-            `${asset.kind}:${asset.assetId}`,
-            asset.officialTag,
-        ]),
+        (effectiveAssets || [])
+            .filter((asset) => asset.status !== "disabled" && (asset.effectiveTag || asset.officialTag))
+            .map((asset) => [
+                `${asset.kind}:${asset.assetId}`,
+                asset.effectiveTag || asset.officialTag,
+            ]),
     );
     const known = new Map(
         (options.knownAssets || []).map((asset) => [

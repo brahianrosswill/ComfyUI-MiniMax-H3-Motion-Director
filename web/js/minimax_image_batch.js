@@ -38,7 +38,6 @@ import {
 import { wirePromptImageMentions } from "./minimax_prompt_mentions.js";
 import {
     allKnownReferenceAssets,
-    effectiveReferenceAssets,
     ensureR2vReferenceAssetSchema,
     ensureReferenceAssetSchema,
     moveReferenceAssetSlot,
@@ -47,6 +46,12 @@ import {
     setCommonAssetEnabled,
 } from "./minimax_reference_assets.mjs";
 import { syncR2vCommonToggleForTask } from "./minimax_r2v_common_ui.mjs";
+import {
+    configureR2vCommonPanel,
+    formatR2vAssetStatusLabel,
+    mountR2vCommonSelection,
+    mountR2vMediaLayout,
+} from "./minimax_r2v_reference_ui.mjs";
 import { t } from "./minimax_i18n.js";
 
 const _players = new WeakMap();
@@ -248,7 +253,7 @@ export const IMAGE_BATCH_STYLES = `
 /* max-height must stay in sync with BATCH_LIST_MAX_H in getImageBatchUiHeight(). */
 .bd-batch-list{display:flex;flex-direction:column;gap:8px;width:100%;max-height:640px;overflow-y:auto;padding-right:2px}
 .bd-r2v-common-toggle.hidden,.bd-r2v-common-panel.hidden{display:none!important}
-.bd-r2v-common-panel{margin:0 0 8px;padding:12px 14px;border:1px solid #46644f;border-radius:10px;background:linear-gradient(165deg,#172019 0%,#131713 58%,#101210 100%)}
+.bd-r2v-common-panel{margin:0 0 8px;padding:12px 14px;border:1px solid #46644f;border-radius:10px;background:linear-gradient(165deg,#172019 0%,#131713 58%,#101210 100%);display:flex;align-items:flex-start}
 .bd-batch-card{background:linear-gradient(165deg,#1a1a1a 0%,#141414 55%,#111 100%);border:1px solid #2c2c2c;border-radius:10px;padding:12px 14px;display:grid;gap:10px;align-items:stretch;box-shadow:inset 0 1px 0 rgba(255,255,255,.03)}
 /* t2v: 提示词为主，预览收成右侧窄栏 */
 .bd-batch-card.bd-batch-plain{grid-template-columns:minmax(0,1fr) minmax(132px,168px)}
@@ -267,7 +272,6 @@ export const IMAGE_BATCH_STYLES = `
 .bd-r2v-common-select-head{display:flex;align-items:center;justify-content:space-between;gap:8px;color:#aaa;font-size:11px;font-weight:650}
 .bd-r2v-common-actions{display:flex;gap:6px}.bd-r2v-common-actions button{font-size:10px;padding:2px 7px}
 .bd-r2v-common-items{display:flex;flex-wrap:wrap;gap:6px 10px}.bd-r2v-common-item{display:flex;align-items:center;gap:5px;color:#ccc;font-size:10px;max-width:190px}.bd-r2v-common-item span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.bd-r2v-use-common-assets{display:flex;align-items:center;gap:6px;color:#ccc;font-size:11px}
 .bd-r2v-local-title{color:#8f9a92;font-size:10px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;margin-bottom:-4px}
 .bd-r2v-paired-audio{border:1px solid #4d5d51;background:#182019;color:#9fe0ad;border-radius:5px;padding:1px 5px;font-size:10px;cursor:pointer}
 .bd-batch-card.running{border-color:#4fff8f;box-shadow:0 0 0 1px rgba(79,255,143,.25)}
@@ -295,6 +299,8 @@ export const IMAGE_BATCH_STYLES = `
 .bd-batch-media{display:flex;flex-direction:column;gap:4px;min-width:88px;max-width:120px}
 /* Left = assets (narrower) · Right = prompt + preview (wider) */
 .bd-batch-r2v-body{display:grid;grid-template-columns:minmax(260px,.85fr) minmax(0,1.4fr);gap:12px;width:100%;align-items:stretch}
+.bd-batch-r2v-body.bd-batch-r2v-body-assets-only{display:block;width:100%}
+.bd-r2v-common-card .bd-batch-r2v-assets{width:100%}
 .bd-batch-r2v-assets{display:flex;flex-direction:column;gap:10px;min-width:0}
 .bd-batch-r2v-main{display:flex;flex-direction:column;gap:10px;min-width:0;min-height:0}
 .bd-r2v-section{background:#0c0c0c;border:1px solid #262626;border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-width:0;box-sizing:border-box}
@@ -957,10 +963,13 @@ function r2vSlotLabel(editor, index, kind, slot, ref, file) {
     const seg = editor.timeline.segments?.[local ? index : editor.selectedIndex] || {
         useCommonAssets: true, excludedCommonAssetIds: [], refs: [], refVideos: [], refAudios: [],
     };
-    const asset = effectiveReferenceAssets(editor.timeline.r2vCommon || {}, seg)
+    const asset = referenceAssetStates(editor.timeline.r2vCommon || {}, seg)
         .find((item) => item.kind === kind && item.assetId === ref.assetId);
     const name = fileBaseName(file || ref.imageFile || ref.videoFile || ref.audioFile || ref.fileName || "");
-    return `${name || t(`batch.r2v.assetKind.${kind}`)}${asset?.officialTag ? ` · ${asset.officialTag}` : ""}`;
+    const fallback = name || t(`batch.r2v.assetKind.${kind}`);
+    return asset
+        ? formatR2vAssetStatusLabel({ ...asset, name: fallback }, t("batch.r2v.disabled"))
+        : fallback;
 }
 
 function renderAudioSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
@@ -1164,17 +1173,8 @@ function renderVideoSlot(el, ref, slot, index, editor, { r2v = false } = {}) {
     }
 }
 
-/**
- * r2v layout: left = pictures/videos/audio · right = prompt + preview (returned).
- * @returns {HTMLElement} main column for prompt/preview
- */
-function appendR2vMediaSections(card, seg, index, editor) {
+function appendR2vAssetSections(assets, seg, index, editor) {
     const counts = countFilledRefs(seg);
-    const body = document.createElement("div");
-    body.className = "bd-batch-r2v-body";
-
-    const assets = document.createElement("div");
-    assets.className = "bd-batch-r2v-assets";
 
     const imgSection = createR2vSection(
         t("batch.r2v.sectionPictures"),
@@ -1293,96 +1293,66 @@ function appendR2vMediaSections(card, seg, index, editor) {
     }
     audioSection.appendChild(audios);
     assets.appendChild(audioSection);
+}
 
-    const main = document.createElement("div");
-    main.className = "bd-batch-r2v-main";
-
-    body.appendChild(assets);
-    body.appendChild(main);
-    card.appendChild(body);
+/**
+ * Segment layout: assets on the left, prompt/preview in the returned main column.
+ * @returns {HTMLElement} main column for prompt/preview
+ */
+function appendR2vMediaSections(card, seg, index, editor) {
+    const { assets, main } = mountR2vMediaLayout(card);
+    appendR2vAssetSections(assets, seg, index, editor);
     return main;
 }
 
-function appendCommonSelection(card, editor, seg, index) {
+function appendR2vCommonMediaSections(card, common, editor) {
+    const { assets } = mountR2vMediaLayout(card, { commonOnly: true });
+    appendR2vAssetSections(assets, common, -1, editor);
+}
+
+function appendCommonSelection(card, editor, seg) {
     const commonAssets = allKnownReferenceAssets(editor.timeline.r2vCommon || {});
-    const excluded = new Set((seg.excludedCommonAssetIds || []).map(String));
-    const section = document.createElement("div");
-    section.className = "bd-r2v-common-select";
-    const head = document.createElement("div");
-    head.className = "bd-r2v-common-select-head";
-    const title = document.createElement("span");
-    title.textContent = t("batch.r2v.commonAssets");
-    head.appendChild(title);
-    const actions = document.createElement("div");
-    actions.className = "bd-r2v-common-actions";
-    for (const [key, useCommon, excludedIds] of [
-        ["batch.r2v.selectAll", true, []],
-        ["batch.r2v.selectNone", false, []],
-    ]) {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.textContent = t(key);
-        button.onclick = (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            seg.useCommonAssets = useCommon;
-            seg.excludedCommonAssetIds = [...excludedIds];
+    const states = new Map(
+        referenceAssetStates(editor.timeline.r2vCommon || {}, seg)
+            .map((asset) => [`${asset.kind}:${asset.assetId}`, asset]),
+    );
+    const displayedAssets = commonAssets.map((asset) => (
+        states.get(`${asset.kind}:${asset.assetId}`) || { ...asset, status: "disabled" }
+    ));
+    mountR2vCommonSelection(card, {
+        assets: displayedAssets,
+        labels: {
+            title: t("batch.r2v.commonAssets"),
+            selectAll: t("batch.r2v.selectAll"),
+            selectNone: t("batch.r2v.selectNone"),
+            empty: t("batch.r2v.commonEmpty"),
+            disabled: t("batch.r2v.disabled"),
+            kind: (kind) => t(`batch.r2v.assetKind.${kind}`),
+        },
+        onSelectAll: () => {
+            seg.useCommonAssets = true;
+            seg.excludedCommonAssetIds = [];
             commitBatchMutation(editor);
-        };
-        actions.appendChild(button);
-    }
-    head.appendChild(actions);
-    section.appendChild(head);
-
-    const useAssets = document.createElement("label");
-    useAssets.className = "bd-r2v-use-common-assets";
-    const useCheckbox = document.createElement("input");
-    useCheckbox.type = "checkbox";
-    useCheckbox.checked = seg.useCommonAssets !== false;
-    useCheckbox.onchange = (event) => {
-        event.stopPropagation();
-        seg.useCommonAssets = useCheckbox.checked;
-        commitBatchMutation(editor);
-    };
-    useAssets.append(useCheckbox, document.createTextNode(t("batch.r2v.useCommonAssets")));
-    section.appendChild(useAssets);
-
-    const items = document.createElement("div");
-    items.className = "bd-r2v-common-items";
-    if (!commonAssets.length) {
-        const empty = document.createElement("span");
-        empty.className = "bd-r2v-common-item";
-        empty.textContent = t("batch.r2v.commonEmpty");
-        items.appendChild(empty);
-    }
-    for (const asset of commonAssets) {
-        const label = document.createElement("label");
-        label.className = "bd-r2v-common-item";
-        const checkbox = document.createElement("input");
-        checkbox.type = "checkbox";
-        checkbox.checked = seg.useCommonAssets !== false && !excluded.has(asset.assetId);
-        checkbox.onchange = (event) => {
-            event.stopPropagation();
+        },
+        onSelectNone: () => {
+            seg.useCommonAssets = false;
+            seg.excludedCommonAssetIds = [];
+            commitBatchMutation(editor);
+        },
+        onToggle: (assetId, enabled) => {
             setCommonAssetEnabled(
                 seg,
                 commonAssets.map((item) => item.assetId),
-                asset.assetId,
-                checkbox.checked,
+                assetId,
+                enabled,
             );
             commitBatchMutation(editor);
-        };
-        const text = document.createElement("span");
-        const kind = t(`batch.r2v.assetKind.${asset.kind}`);
-        text.textContent = `${kind}: ${asset.label}`;
-        text.title = text.textContent;
-        label.append(checkbox, text);
-        items.appendChild(label);
-    }
-    section.appendChild(items);
-    card.appendChild(section);
+        },
+    });
 }
 
 function appendCommonPoolCard(panel, editor) {
+    configureR2vCommonPanel(panel);
     const common = editor.timeline.r2vCommon || (editor.timeline.r2vCommon = { refs: [], refVideos: [], refAudios: [] });
     const card = document.createElement("div");
     card.className = "bd-batch-r2v bd-r2v-common-card";
@@ -1395,7 +1365,7 @@ function appendCommonPoolCard(panel, editor) {
     hint.textContent = t("batch.r2v.commonPoolHint");
     head.append(title, hint);
     card.appendChild(head);
-    appendR2vMediaSections(card, common, -1, editor);
+    appendR2vCommonMediaSections(card, common, editor);
     panel.appendChild(card);
 }
 
@@ -1798,7 +1768,7 @@ export function renderImageBatchGroups(editor) {
         head.appendChild(meta);
         card.appendChild(head);
 
-        if (isR2v) appendCommonSelection(card, editor, seg, index);
+        if (isR2v) appendCommonSelection(card, editor, seg);
 
         if (key === "i2v") {
             const hasExplicitMaterial = hasI2vSource(seg);

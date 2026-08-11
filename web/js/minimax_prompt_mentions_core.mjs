@@ -97,6 +97,31 @@ export function promptValueNeedsRender(hiddenValue, richValue, nextValue) {
     return String(hiddenValue || "") !== next || String(richValue || "") !== next;
 }
 
+export function referenceChipPresentation(item = {}, formatters = {}) {
+    const state = item.status || (item.assetId ? "active" : "missing");
+    const identity = String(item.assetId || "");
+    const name = String(item.name || item.label || identity);
+    if (state === "active") {
+        return {
+            state,
+            text: String(item.effectiveTag || item.officialTag || item.label || identity),
+            title: name || String(item.effectiveTag || item.officialTag || ""),
+        };
+    }
+    if (state === "disabled") {
+        return {
+            state,
+            text: formatters.formatDisabled?.(name) || name,
+            title: formatters.formatDisabledTitle?.(String(item.authoringTag || ""), name) || name,
+        };
+    }
+    return {
+        state: "missing",
+        text: formatters.formatMissing?.(name) || name,
+        title: formatters.formatMissingTitle?.(name) || name,
+    };
+}
+
 export function mentionQueryFromText(text, cursor = String(text || "").length) {
     const before = String(text || "").slice(0, Math.max(0, Number(cursor) || 0));
     const match = before.match(/@([^\s@]*)$/);
