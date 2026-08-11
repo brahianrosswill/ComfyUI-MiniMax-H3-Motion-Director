@@ -13,6 +13,7 @@ import {
     moveMentionActiveIndex,
     promptValueNeedsRender,
     referenceChipPresentation,
+    resolveMentionInsertion,
     shouldHandleTimelineShortcut,
     shouldCloseMentionForScroll,
 } from "../web/js/minimax_prompt_mentions_core.mjs";
@@ -49,6 +50,30 @@ test("disabled Common picker item is enabled, remapped and keeps its semantic id
     assert.equal(selected.effectiveTag, "<Picture 1>");
     assert.equal(selected.token, token);
     assert.equal(selected.assetId, "B");
+});
+
+test("disabled Common insertion keeps its range while activation closes the menu", async () => {
+    const originalRange = {
+        cloneRange: () => ({ id: "captured-range" }),
+    };
+    let liveRange = originalRange;
+    const prepared = await resolveMentionInsertion({ assetId: "B" }, {
+        target: liveRange,
+        activateItem: async (item) => {
+            liveRange = null; // document click closes the menu during the await
+            await Promise.resolve();
+            return { ...item, status: "active", token: "{{mmx-ref:picture:B}}" };
+        },
+    });
+    assert.equal(liveRange, null);
+    assert.deepEqual(prepared, {
+        target: { id: "captured-range" },
+        item: {
+            assetId: "B",
+            status: "active",
+            token: "{{mmx-ref:picture:B}}",
+        },
+    });
 });
 
 test("@ picker includes disabled Common and active Local, but excludes missing assets", () => {

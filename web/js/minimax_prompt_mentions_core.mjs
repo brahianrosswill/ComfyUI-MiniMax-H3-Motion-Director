@@ -35,6 +35,22 @@ export async function activateMentionItem(item, {
     };
 }
 
+export async function resolveMentionInsertion(item, {
+    target,
+    activateItem,
+    cloneTarget = (value) => value?.cloneRange?.() || value || null,
+} = {}) {
+    // Enabling a disabled Common asset serializes state asynchronously. The
+    // click event can close the menu during that await, so capture an
+    // independent insertion range before activation yields to the event loop.
+    const capturedTarget = cloneTarget(target);
+    if (!capturedTarget || typeof activateItem !== "function") return null;
+    return {
+        target: capturedTarget,
+        item: await activateItem(item),
+    };
+}
+
 export function computeMentionMenuPosition(anchorRect = {}, menuRect = {}, viewport = {}) {
     const margin = 8;
     const gap = 4;

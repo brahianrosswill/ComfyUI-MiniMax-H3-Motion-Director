@@ -30,6 +30,7 @@ import {
     moveMentionActiveIndex,
     promptValueNeedsRender,
     referenceChipPresentation,
+    resolveMentionInsertion,
     shouldCloseMentionForScroll,
 } from "./minimax_prompt_mentions_core.mjs";
 export {
@@ -304,26 +305,31 @@ export function wirePromptImageMentions(editor, textarea, getMedia, options = {}
         if (insertingMention) return;
         insertingMention = true;
         const wasDisabled = item.status === "disabled";
-        let resolved = item;
+        let prepared = null;
         try {
-            resolved = await activateMentionItem(item, {
-                enableItem: options.onEnableAsset,
-                getItems: mediaItems,
+            prepared = await resolveMentionInsertion(item, {
+                target: mentionRange,
+                activateItem: (candidate) => activateMentionItem(candidate, {
+                    enableItem: options.onEnableAsset,
+                    getItems: mediaItems,
+                }),
             });
         } catch (error) {
             console.error("[MiniMax H3 Motion Director] reference mention activation failed:", error);
             insertingMention = false;
             return;
         }
-        if (destroyed || !mentionRange) {
+        if (destroyed || !prepared?.target || !rich.isConnected) {
             insertingMention = false;
             return;
         }
-        mentionRange.deleteContents();
+        const resolved = prepared.item;
+        const insertionRange = prepared.target;
+        insertionRange.deleteContents();
         const chip = makeChip(resolved.token, resolved);
         const space = document.createTextNode(" ");
-        mentionRange.insertNode(space);
-        mentionRange.insertNode(chip);
+        insertionRange.insertNode(space);
+        insertionRange.insertNode(chip);
         const selection = window.getSelection();
         const caret = document.createRange();
         caret.setStartAfter(space);
