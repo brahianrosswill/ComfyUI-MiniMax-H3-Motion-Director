@@ -17,6 +17,7 @@ _CONSUMER_ONLY_SETTINGS = {
     "context_length",
     "latent_handoff_pipeline",
     "pipeline",
+    "seed",
 }
 
 
