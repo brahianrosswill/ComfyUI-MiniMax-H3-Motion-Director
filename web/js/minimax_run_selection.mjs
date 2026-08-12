@@ -9,18 +9,22 @@ function normalizedSelection(value) {
 }
 
 function memoryRunSelectionState(editor) {
+    const enabled = !!editor?.timeline?.runSelectEnabled;
     return {
-        enabled: !!editor?.timeline?.runSelectEnabled,
-        selection: normalizedSelection(editor?.timeline?.runSelection),
+        enabled,
+        // When Run Selection is off, runSelection is remembered UI state only.
+        // Execution serialization intentionally canonicalizes it to [].
+        selection: enabled ? normalizedSelection(editor?.timeline?.runSelection) : [],
     };
 }
 
 function serializedRunSelectionState(editor) {
     try {
         const payload = JSON.parse(String(editor?.timelineWidget?.value || "{}"));
+        const enabled = !!payload.runSelectEnabled;
         return {
-            enabled: !!payload.runSelectEnabled,
-            selection: normalizedSelection(payload.runSelection),
+            enabled,
+            selection: enabled ? normalizedSelection(payload.runSelection) : [],
         };
     } catch {
         return null;

@@ -517,7 +517,15 @@ export function wirePromptImageMentions(editor, textarea, getMedia, options = {}
         });
     };
     const onCompositionStart = () => { composing = true; closeMenu(); };
-    const onCompositionEnd = () => { composing = false; syncTextarea({ hydrate: true }); };
+    const onCompositionEnd = () => {
+        composing = false;
+        syncTextarea({ hydrate: true });
+        // IME/composition can suppress the normal beforeinput/input mention-open path.
+        // Re-check after the browser finalizes both content and Selection.
+        queueMicrotask(() => {
+            if (!destroyed && !composing) openIfMention();
+        });
+    };
     const onPaste = () => queueMicrotask(() => {
         if (destroyed || composing) return;
         syncTextarea({ hydrate: true });
