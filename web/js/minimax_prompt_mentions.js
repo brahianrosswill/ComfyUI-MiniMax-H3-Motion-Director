@@ -152,20 +152,68 @@ function serializeRich(root) {
     return walk(root).replace(/\n$/, "");
 }
 
-function caretMentionRange(root) {
+function normalizeCaretToTextNode(root) {
     const selection = window.getSelection?.();
     if (!selection?.rangeCount) return null;
-    const caret = selection.getRangeAt(0);
-    if (!caret.collapsed || !root.contains(caret.startContainer)) return null;
+
+    const current = selection.getRangeAt(0);
+    if (
+        !current.collapsed
+        || !(current.startContainer === root || root.contains(current.startContainer))
+    ) {
+        return null;
+    }
+
+    if (current.startContainer.nodeType === Node.TEXT_NODE) {
+        return current;
+    }
+
+    const container = current.startContainer;
+    const offset = current.startOffset;
+    const previous = container.childNodes?.[offset - 1];
+
+    // 浏览器经常把 caret 放成：
+    // <div contenteditable> ... TextNode | </div>
+    // 把它重新锚定到前一个真实文字节点末尾。
+    if (previous?.nodeType === Node.TEXT_NODE) {
+        const range = document.createRange();
+        range.setStart(previous, previous.data.length);
+        range.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        return range;
+    }
+
+    // 如果当前位置根本没有文字节点，主动建立一个稳定的 caret host。
+    const textNode = document.createTextNode("");
+    const reference = container.childNodes?.[offset] || null;
+    container.insertBefore(textNode, reference);
+
+    const range = document.createRange();
+    range.setStart(textNode, 0);
+    range.collapse(true);
+    selection.removeAllRanges();
+    selection.addRange(range);
+    return range;
+}
+
+function caretMentionRange(root) {
+    const caret = normalizeCaretToTextNode(root);
+    if (!caret) return null;
+
     const node = caret.startContainer;
-    if (node.nodeType !== Node.TEXT_NODE) return null;
     const before = node.data.slice(0, caret.startOffset);
     const match = before.match(/@([^\s@]*)$/);
     if (!match) return null;
+
     const range = document.createRange();
     range.setStart(node, caret.startOffset - match[0].length);
     range.setEnd(node, caret.startOffset);
-    return { range, query: match[1] };
+
+    return {
+        range,
+        query: match[1],
+    };
 }
 
 function previousChipAtCaret(root) {
@@ -332,7 +380,9 @@ export function wirePromptImageMentions(editor, textarea, getMedia, options = {}
         insertionRange.insertNode(chip);
         const selection = window.getSelection();
         const caret = document.createRange();
-        caret.setStartAfter(space);
+        // Keep the caret inside the trailing text node instead of at a DOM boundary.
+        // This makes the next typed @ immediately detectable by caretMentionRange().
+        caret.setStart(space, space.data.length);
         caret.collapse(true);
         selection.removeAllRanges();
         selection.addRange(caret);
@@ -414,7 +464,57 @@ export function wirePromptImageMentions(editor, textarea, getMedia, options = {}
 
     const onRichInput = () => {
         const hydrated = syncTextarea({ hydrate: true });
-        if (!composing && !hydrated) openIfMention();
+        if (!composing && !hydrated) {
+            // Let the browser finish updating Selection before reading the caret.
+            queueMicrotask(() => {
+                if (!destroyed && !composing) openIfMention();
+            });
+        }
+    };
+
+    const onRichBeforeInput = (event) => {
+        if (
+            destroyed
+            || composing
+            || event.isComposing
+            || event.inputType !== "insertText"
+            || event.data !== "@"
+        ) {
+            return;
+        }
+
+        const selection = window.getSelection?.();
+        if (!selection?.rangeCount) return;
+
+        const current = selection.getRangeAt(0);
+        if (
+            !current.collapsed
+            || !(current.startContainer === rich || rich.contains(current.startContainer))
+        ) {
+            return;
+        }
+
+        // Own @ insertion so one physical key press can create exactly one trigger.
+        // This also guarantees that the caret lands in a real text node.
+        event.preventDefault();
+        current.deleteContents();
+
+        const trigger = document.createTextNode("@");
+        current.insertNode(trigger);
+
+        const caret = document.createRange();
+        caret.setStart(trigger, trigger.data.length);
+        caret.collapse(true);
+        selection.removeAllRanges();
+        selection.addRange(caret);
+
+        // preventDefault() means rich itself will not emit the normal input event,
+        // so synchronize the hidden textarea explicitly.
+        syncTextarea();
+
+        queueMicrotask(() => {
+            if (!destroyed && !composing) openIfMention();
+        });
     };
     const onCompositionStart = () => { composing = true; closeMenu(); };
     const onCompositionEnd = () => { composing = false; syncTextarea({ hydrate: true }); };
@@ -453,6 +553,7 @@ export function wirePromptImageMentions(editor, textarea, getMedia, options = {}
             closeMenu();
         }
     };
+    listeners.add(rich, "beforeinput", onRichBeforeInput);
     listeners.add(rich, "input", onRichInput);
     listeners.add(rich, "click", openIfMention);
     listeners.add(rich, "keydown", onRichKeydown);

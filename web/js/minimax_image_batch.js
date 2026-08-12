@@ -1892,41 +1892,44 @@ export function renderImageBatchGroups(editor) {
         prompts.querySelector("textarea").placeholder = ph;
         prompts.querySelector("textarea").value = seg.prompt || "";
         const promptEl = prompts.querySelector('[data-f="prompt"]');
+        const getLiveSeg = () => editor.timeline.segments?.[index] || seg;
         promptEl.oninput = (e) => {
-            seg.prompt = e.target.value;
-            seg.negativePrompt = "";
+            const liveSeg = getLiveSeg();
+            liveSeg.prompt = e.target.value;
+            liveSeg.negativePrompt = "";
             editor.scheduleTimelineSync();
         };
         if (isR2v) {
-            const controller = wirePromptImageMentions(editor, promptEl, () => ({
-                assets: referenceAssetStates(editor.timeline.r2vCommon || {}, seg),
-                refs: seg.refs || [],
-                audios: seg.refAudios || [],
-                videos: seg.refVideos || [],
-            }), {
+            const controller = wirePromptImageMentions(editor, promptEl, () => {
+                const liveSeg = getLiveSeg();
+                return {
+                    assets: referenceAssetStates(editor.timeline.r2vCommon || {}, liveSeg),
+                    refs: liveSeg.refs || [],
+                    audios: liveSeg.refAudios || [],
+                    videos: liveSeg.refVideos || [],
+                };
+            }, {
                 overlayLayer: editor._directorOverlayLayer,
                 onEnableAsset: (item) => {
                     if (item?.source !== "common") return null;
+                    const liveSeg = getLiveSeg();
                     const common = editor.timeline.r2vCommon || {};
                     const commonIds = allKnownReferenceAssets(common).map((asset) => asset.assetId);
-                    if (!setCommonAssetEnabled(seg, commonIds, item.assetId, true)) return null;
-                    // Do not normalize/commit yet: normalizeImageBatchSegments()
-                    // replaces segment objects. The rich editor must first write the
-                    // semantic token into this live segment, then both changes are
-                    // serialized atomically by onMentionInserted below.
-                    return referenceAssetStates(common, seg).find((asset) => (
+                    if (!setCommonAssetEnabled(liveSeg, commonIds, item.assetId, true)) return null;
+                    // Do not rebuild the prompt editor here. Keep the current DOM,
+                    // selection, and mention range alive until the semantic token is
+                    // inserted and serialized.
+                    return referenceAssetStates(common, liveSeg).find((asset) => (
                         asset.kind === item.kind && asset.assetId === item.assetId
                     ));
                 },
                 onMentionInserted: (_item, { wasDisabled }) => {
                     if (!wasDisabled) return;
-                    // syncTextarea() has already updated seg.prompt at this point.
-                    // Commit after insertion so normalization copies both the newly
-                    // enabled asset and the semantic prompt token into the live plan.
+                    // syncTextarea() has already written the semantic token through
+                    // promptEl.oninput into the current normalized segment. Commit
+                    // both the enabled Common asset and Prompt atomically, but do not
+                    // destroy/rebuild the active contenteditable editor.
                     editor.commit(true, { syncTimeline: true });
-                    setTimeout(() => {
-                        if (!editor._destroyed) editor.renderImageBatchGroups?.();
-                    }, 0);
                 },
             });
             if (controller) editor._batchPromptMentionControllers.push(controller);
